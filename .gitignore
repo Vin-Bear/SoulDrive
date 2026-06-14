@@ -1,0 +1,64 @@
+# Dependency directories
+node_modules/
+souldrive-ui/node_modules/
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and packaging artifacts
+build/
+dist/
+souldrive-ui/dist/
+souldrive-ui/src-tauri/target/
+souldrive-ui/src-tauri/gen/schemas/
+souldrive-ui/src-tauri/sidecars/souldrive-sidecar/
+souldrive-ui/src-tauri/sidecars/souldrive-sidecar.exe
+
+# Local runtime data
+runtime/
+souldrive_db/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local model weights and caches
+models/
+*.gguf
+*.safetensors
+*.bin
+
+# Private papers and generated submission files
+papers/
+workspace/
+docs/submission/
+*.pdf
+*.docx
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+license.json
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Editor and OS files
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Generated local inventory dumps
+structure.txt
+LOG.MD

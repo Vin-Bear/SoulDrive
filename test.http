@@ -1,0 +1,25 @@
+### GET request to example server
+GET https://examples.http-client.intellij.net/get
+    ?generated-in=PyCharm
+
+###
+
+POST http://127.0.0.1:8000/chat
+Content-Type: application/json
+X-SoulDrive-Token: {{souldrive_token}}
+
+{
+  "query": "请详细解释 Transformer 模型的核心创新点是什么？它是如何解决传统 RNN 的缺陷的？",
+  "top_k": 3
+}
+
+###
+
+POST http://127.0.0.1:8000/chat
+Content-Type: application/json
+X-SoulDrive-Token: {{souldrive_token}}
+
+{
+  "query": "请基于当前文献，把 Transformer 模型的核心逻辑整理成思维导图。",
+  "top_k": 3
+}

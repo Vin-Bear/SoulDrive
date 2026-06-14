@@ -1,0 +1,169 @@
+import copy
+import json
+import os
+import time
+from pathlib import Path
+from core.audit_log import AuditLogger, default_audit_logger
+from core.paths import local_data_root
+from core.workspace import SoulDriveWorkspace
+
+STATE_PATH: str | None = None
+
+DEFAULT_STATE = {
+    "locked": True,
+    "reason": "storage device required",
+    "auth_level": "NONE",
+    "hardware_sn": None,
+    "active_drive": None,
+    "workspace_path": None,
+    "indexing": {
+        "status": "idle",
+        "run_id": None,
+        "total_files": 0,
+        "discovered_files": 0,
+        "skipped_files": 0,
+        "succeeded_files": 0,
+        "processed_files": 0,
+        "current_file": None,
+        "failures": [],
+        "failure_summary": {},
+        "chunk_count": 0,
+        "started_at": None,
+        "finished_at": None,
+        "disk": {},
+    },
+    "updated_at": 0,
+}
+
+
+def default_state():
+    return copy.deepcopy(DEFAULT_STATE)
+
+
+def get_runtime_state():
+    path = runtime_state_path()
+    if not os.path.exists(path):
+        return default_state()
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            state = json.load(file)
+    except Exception:
+        return default_state()
+
+    merged = default_state()
+    merged.update(state)
+    indexing = copy.deepcopy(DEFAULT_STATE["indexing"])
+    indexing.update(state.get("indexing") or {})
+    merged["indexing"] = indexing
+    return merged
+
+
+def set_runtime_state(**updates):
+    path = runtime_state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    state = get_runtime_state()
+    state.update(updates)
+    state["updated_at"] = time.time()
+
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+    return state
+
+
+def runtime_state_path() -> str:
+    return STATE_PATH or str(local_data_root() / "runtime_state.json")
+
+
+def workspace_runtime_state_path(workspace_path: str) -> str:
+    return str(Path(workspace_path) / "runtime" / "runtime_state.json")
+
+
+def use_workspace_runtime_state(workspace_path: str) -> str:
+    global STATE_PATH
+    STATE_PATH = workspace_runtime_state_path(workspace_path)
+    return STATE_PATH
+
+
+def unlock_runtime(
+    auth_level: str,
+    hardware_sn: str | None,
+    active_drive: str | None,
+    workspace_path: str | None = None,
+    reason: str = "workspace mounted",
+):
+    audit_logger = _audit_logger_for_workspace_path(workspace_path)
+    state = set_runtime_state(
+        locked=False,
+        reason=reason,
+        auth_level=auth_level,
+        hardware_sn=hardware_sn,
+        active_drive=active_drive,
+        workspace_path=workspace_path,
+    )
+    audit_logger.append_event("runtime.unlock", {
+        "auth_level": auth_level,
+        "hardware_sn_hash": _hash_sensitive(hardware_sn),
+        "active_drive": active_drive,
+        "reason": reason,
+    })
+    return state
+
+
+def lock_runtime(reason: str = "storage device removed"):
+    previous_state = get_runtime_state()
+    audit_logger = _audit_logger_for_workspace_path(previous_state.get("workspace_path"))
+    state = set_runtime_state(
+        locked=True,
+        reason=reason,
+        auth_level="NONE",
+        hardware_sn=None,
+        active_drive=None,
+        workspace_path=None,
+        indexing={
+            "status": "locked",
+            "run_id": None,
+            "total_files": 0,
+            "discovered_files": 0,
+            "skipped_files": 0,
+            "succeeded_files": 0,
+            "processed_files": 0,
+            "current_file": None,
+            "failures": [],
+            "failure_summary": {},
+            "chunk_count": 0,
+            "started_at": None,
+            "finished_at": None,
+            "disk": {},
+        },
+    )
+    audit_logger.append_event("runtime.lock", {
+        "reason": reason,
+    })
+    return state
+
+
+def _hash_sensitive(value: str | None):
+    if not value:
+        return None
+    import hashlib
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _audit_logger_for_workspace_path(workspace_path: str | None):
+    if not workspace_path:
+        return default_audit_logger
+    try:
+        return AuditLogger.for_workspace(SoulDriveWorkspace(workspace_path).ensure())
+    except Exception:
+        return default_audit_logger
+
+
+def update_indexing_status(**updates):
+    state = get_runtime_state()
+    indexing = copy.deepcopy(DEFAULT_STATE["indexing"])
+    indexing.update(state.get("indexing") or {})
+    indexing.update(updates)
+    return set_runtime_state(indexing=indexing)
