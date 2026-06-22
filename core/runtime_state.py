@@ -16,6 +16,10 @@ DEFAULT_STATE = {
     "hardware_sn": None,
     "active_drive": None,
     "workspace_path": None,
+    "hardware_mounted": False,
+    "crypto_initialized": False,
+    "software_unlocked": False,
+    "security_reason": "storage device required",
     "indexing": {
         "status": "idle",
         "run_id": None,
@@ -96,17 +100,49 @@ def unlock_runtime(
 ):
     audit_logger = _audit_logger_for_workspace_path(workspace_path)
     state = set_runtime_state(
-        locked=False,
-        reason=reason,
-        auth_level=auth_level,
+        locked=True,
+        reason="workspace passphrase required",
+        auth_level="HARDWARE_ONLY",
         hardware_sn=hardware_sn,
         active_drive=active_drive,
         workspace_path=workspace_path,
+        hardware_mounted=True,
+        crypto_initialized=False,
+        software_unlocked=False,
+        security_reason="workspace passphrase required",
     )
     audit_logger.append_event("runtime.unlock", {
-        "auth_level": auth_level,
+        "auth_level": "HARDWARE_ONLY",
         "hardware_sn_hash": _hash_sensitive(hardware_sn),
         "active_drive": active_drive,
+        "reason": "workspace passphrase required",
+    })
+    return state
+
+
+def mark_software_unlocked(reason: str = "workspace unlocked"):
+    state = set_runtime_state(
+        locked=False,
+        reason=reason,
+        auth_level="HARDWARE_PLUS_PASSWORD",
+        hardware_mounted=True,
+        software_unlocked=True,
+        security_reason=reason,
+    )
+    _audit_logger_for_workspace_path(state.get("workspace_path")).append_event("security.unlock_succeeded", {})
+    return state
+
+
+def mark_software_locked(reason: str = "workspace passphrase required"):
+    previous_state = get_runtime_state()
+    state = set_runtime_state(
+        locked=True,
+        reason=reason,
+        auth_level="HARDWARE_ONLY" if previous_state.get("hardware_mounted") else "NONE",
+        software_unlocked=False,
+        security_reason=reason,
+    )
+    _audit_logger_for_workspace_path(previous_state.get("workspace_path")).append_event("security.software_locked", {
         "reason": reason,
     })
     return state
@@ -122,6 +158,10 @@ def lock_runtime(reason: str = "storage device removed"):
         hardware_sn=None,
         active_drive=None,
         workspace_path=None,
+        hardware_mounted=False,
+        crypto_initialized=False,
+        software_unlocked=False,
+        security_reason=reason,
         indexing={
             "status": "locked",
             "run_id": None,

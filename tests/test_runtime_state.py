@@ -35,6 +35,30 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(state["indexing"]["failure_summary"], {})
         self.assertEqual(state["indexing"]["chunk_count"], 0)
 
+    def test_runtime_unlock_marks_hardware_only_until_software_unlock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = str(Path(temp_dir) / "runtime_state.json")
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            with patch.object(runtime_state, "STATE_PATH", state_path):
+                state = runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+
+        self.assertTrue(state["locked"])
+        self.assertTrue(state["hardware_mounted"])
+        self.assertFalse(state["software_unlocked"])
+        self.assertEqual(state["security_reason"], "workspace passphrase required")
+
+    def test_mark_software_unlocked_allows_sensitive_workflows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = str(Path(temp_dir) / "runtime_state.json")
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            with patch.object(runtime_state, "STATE_PATH", state_path):
+                runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                state = runtime_state.mark_software_unlocked()
+
+        self.assertFalse(state["locked"])
+        self.assertTrue(state["software_unlocked"])
+        self.assertEqual(state["auth_level"], "HARDWARE_PLUS_PASSWORD")
+
     def test_unlock_preserves_existing_workspace_when_drive_is_missing(self):
         from core.mcp_server import RuntimeRequest, runtime_unlock
 
@@ -68,6 +92,7 @@ class RuntimeStateTests(unittest.TestCase):
             workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
             with patch.object(runtime_state, "STATE_PATH", state_path):
                 runtime_state.unlock_runtime("PRO", "SECRET-SN", temp_dir, workspace.root_path)
+                runtime_state.mark_software_unlocked()
                 public_state = public_runtime_state()
 
         serialized = str(public_state)

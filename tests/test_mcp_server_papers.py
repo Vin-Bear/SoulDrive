@@ -64,6 +64,7 @@ class McpServerPapersTests(unittest.TestCase):
                 clear=False,
             ):
                 runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                runtime_state.mark_software_unlocked()
                 response = TestClient(mcp_server.app).post(
                     "/documents/import",
                     json={"source_paths": [str(source_pdf)]},
@@ -115,6 +116,7 @@ class McpServerPapersTests(unittest.TestCase):
                 clear=False,
             ):
                 runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                runtime_state.mark_software_unlocked()
                 response = TestClient(mcp_server.app).post(
                     "/papers/import",
                     json={"source_paths": [str(source_txt)]},

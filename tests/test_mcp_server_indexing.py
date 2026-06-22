@@ -38,6 +38,7 @@ class McpServerIndexingTests(unittest.TestCase):
                 return_value=fake_process,
             ) as popen:
                 runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                runtime_state.mark_software_unlocked()
                 response = TestClient(mcp_server.app).post(
                     "/index/run",
                     headers={"X-SoulDrive-Token": "test-token"},
@@ -70,6 +71,7 @@ class McpServerIndexingTests(unittest.TestCase):
                 clear=False,
             ):
                 runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                runtime_state.mark_software_unlocked()
                 response = TestClient(mcp_server.app).post(
                     "/index/run",
                     headers={"X-SoulDrive-Token": "test-token"},
@@ -77,6 +79,29 @@ class McpServerIndexingTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["status"], "already_running")
+
+    def test_index_run_rejects_hardware_only_workspace_before_software_unlock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = str(Path(temp_dir) / "runtime_state.json")
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+
+            with patch.object(runtime_state, "STATE_PATH", state_path), patch.object(
+                mcp_server,
+                "current_workspace",
+                return_value=workspace,
+            ), patch.dict(
+                "os.environ",
+                {"SOULDRIVE_API_TOKEN": "test-token"},
+                clear=False,
+            ):
+                runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+                response = TestClient(mcp_server.app).post(
+                    "/index/run",
+                    headers={"X-SoulDrive-Token": "test-token"},
+                )
+
+        self.assertEqual(response.status_code, 423)
+        self.assertEqual(response.json()["reason"], "workspace passphrase required")
 
     def test_index_run_rejects_locked_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:

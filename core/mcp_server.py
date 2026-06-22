@@ -246,6 +246,23 @@ def public_runtime_state():
         public_state["hardware_sn"] = "HASHED"
     return public_state
 
+
+def require_software_unlock():
+    state = get_runtime_state()
+    if state.get("locked") or not state.get("software_unlocked"):
+        current_audit_logger().append_event("security.password_required", {
+            "reason": state.get("security_reason") or state.get("reason") or "workspace passphrase required",
+        })
+        return JSONResponse(
+            {
+                "error": "SoulDrive workspace requires passphrase unlock",
+                "status": "locked",
+                "reason": "workspace passphrase required",
+            },
+            status_code=423,
+        )
+    return None
+
 # =====================================================================
 # --- 核心业务接口：UI 数据流通道 ---
 # =====================================================================
@@ -288,9 +305,10 @@ async def chat_stream(request: ChatRequest):
 
     # 工业标准的流式返回闭包
     def event_generator():
-        state = get_runtime_state()
-        if state.get("locked"):
+        locked_response = require_software_unlock()
+        if locked_response is not None:
             cleanup_runtime()
+            state = get_runtime_state()
             current_audit_logger().append_event("chat.rejected_locked", {
                 "reason": state.get("reason", "storage device removed"),
             }, trace_id=trace_id)
@@ -370,12 +388,11 @@ async def papers_import(request: PaperImportRequest):
 
 @app.post("/index/run")
 async def index_run():
+    locked_response = require_software_unlock()
+    if locked_response is not None:
+        return locked_response
+
     state = get_runtime_state()
-    if state.get("locked"):
-        return JSONResponse(
-            {"error": "SoulDrive workspace is locked", "status": "locked"},
-            status_code=423,
-        )
 
     workspace = current_workspace()
     auth_level = str(state.get("auth_level") or "PRO")
@@ -470,12 +487,9 @@ def _document_library_payload(workspace: SoulDriveWorkspace) -> dict:
 
 
 def _import_documents(request: PaperImportRequest):
-    state = get_runtime_state()
-    if state.get("locked"):
-        return JSONResponse(
-            {"error": "SoulDrive workspace is locked", "status": "locked"},
-            status_code=423,
-        )
+    locked_response = require_software_unlock()
+    if locked_response is not None:
+        return locked_response
 
     workspace = current_workspace()
     items = [import_paper_into_workspace(workspace, source_path) for source_path in request.source_paths]
