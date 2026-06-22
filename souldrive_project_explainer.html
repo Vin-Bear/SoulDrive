@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoulDrive 项目速读与架构讲解</title>
+  <style>
+    :root {
+      --bg: #f3f5f1;
+      --paper: #ffffff;
+      --ink: #17211f;
+      --muted: #626b64;
+      --line: #d6ddd4;
+      --green: #1f6f61;
+      --teal: #23534e;
+      --gold: #b27a22;
+      --blue: #2f64b4;
+      --red: #b54848;
+      --violet: #6b4bb7;
+      --soft-green: #e8f2ee;
+      --soft-gold: #fff5df;
+      --soft-blue: #eaf0fb;
+      --soft-violet: #f0ecfb;
+      --code-bg: #eef2ec;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+      line-height: 1.65;
+    }
+
+    .page {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 32px 24px 56px;
+    }
+
+    header,
+    section {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 16px 36px rgba(32, 44, 38, 0.06);
+    }
+
+    header {
+      padding: 30px;
+      border-top: 6px solid var(--teal);
+    }
+
+    section {
+      margin-top: 20px;
+      padding: 24px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      letter-spacing: 0;
+      line-height: 1.25;
+    }
+
+    h1 {
+      font-size: 32px;
+    }
+
+    h2 {
+      font-size: 22px;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      font-size: 17px;
+      margin-bottom: 8px;
+    }
+
+    p {
+      margin: 8px 0 0;
+    }
+
+    ul,
+    ol {
+      margin: 8px 0 0;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    code {
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--code-bg);
+      font-family: Consolas, "JetBrains Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f6f8f5;
+      color: #24332f;
+      white-space: nowrap;
+    }
+
+    .subtitle {
+      max-width: 980px;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .meta-row,
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f9fbf8;
+      color: #34423e;
+      font-size: 13px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 15px;
+      background: #fbfcfa;
+    }
+
+    .card strong {
+      display: block;
+      color: var(--teal);
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+
+    .card p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .diagram-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfa;
+      margin-top: 14px;
+    }
+
+    svg {
+      display: block;
+      min-width: 1140px;
+      width: 100%;
+      height: auto;
+    }
+
+    .lane { fill: #f0f5f2; stroke: #d6ddd4; stroke-width: 1; }
+    .box { fill: #ffffff; stroke: #bfc9c2; stroke-width: 1.5; rx: 8; }
+    .box-green { stroke: var(--green); fill: var(--soft-green); }
+    .box-gold { stroke: var(--gold); fill: var(--soft-gold); }
+    .box-blue { stroke: var(--blue); fill: var(--soft-blue); }
+    .box-violet { stroke: var(--violet); fill: var(--soft-violet); }
+    .box-red { stroke: var(--red); fill: #fff0f0; }
+    .box-white { fill: #ffffff; }
+    .title { font-size: 17px; font-weight: 700; fill: #17211f; }
+    .small { font-size: 13px; fill: #3f4b46; }
+    .tiny { font-size: 12px; fill: #69746e; }
+    .lane-title { font-size: 15px; font-weight: 700; fill: #30423d; }
+    .arrow { stroke: #52635d; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .arrow-soft { stroke: #88968f; stroke-width: 1.7; fill: none; marker-end: url(#arrow-soft); stroke-dasharray: 7 6; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .three-col {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .note {
+      border-left: 4px solid var(--green);
+      background: #f8fbf8;
+      padding: 12px 14px;
+      margin-top: 12px;
+      color: #35423e;
+    }
+
+    .warning {
+      border-left-color: var(--gold);
+      background: #fff9ea;
+    }
+
+    .read-path {
+      counter-reset: step;
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfa;
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      background: var(--teal);
+      color: #ffffff;
+      font-weight: 700;
+    }
+
+    .step p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .file-list td:first-child {
+      width: 270px;
+      font-family: Consolas, "JetBrains Mono", monospace;
+      font-size: 13px;
+      color: #1d3d39;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 7px;
+      border-radius: 5px;
+      background: var(--code-bg);
+      color: #36443f;
+      font-size: 12px;
+      font-family: Consolas, "JetBrains Mono", monospace;
+    }
+
+    @media (max-width: 980px) {
+      .summary-grid,
+      .two-col,
+      .three-col {
+        grid-template-columns: 1fr;
+      }
+
+      .page {
+        padding: 18px 12px 36px;
+      }
+
+      header,
+      section {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <h1>SoulDrive 项目速读与架构讲解</h1>
+      <p class="subtitle">
+        这份说明基于当前源码结构整理，目标是帮助你快速建立项目全局图景：SoulDrive 是一个面向私有资产的端侧知识引擎，
+        当前测试与演示仍以论文作为第一切入口，但底层能力已覆盖更广泛的本地知识文档场景，重点在文档解析、增量索引、
+        混合检索、证据链、知识图谱、本地 GGUF 推理、Tauri 桌面打包和可移动存储授权。
+      </p>
+      <div class="meta-row">
+        <span class="pill">后端：Python + FastAPI + Chroma + SQLite + llama.cpp</span>
+        <span class="pill">桌面：React + Vite + Tauri 2 + Rust sidecar 管理</span>
+        <span class="pill">核心数据：PDF、向量库、父子切片、FTS、图谱、审计日志</span>
+        <span class="pill">阅读日期：2026-06-15</span>
+      </div>
+    </header>
+
+    <section>
+      <h2>一、先用一句话看懂</h2>
+      <p>
+        SoulDrive 的主线是：<strong>把私有知识文档放进本地或 U 盘工作区，后端离线解析并建立多种索引，用户在桌面 UI 中提问，
+        系统先检索可追溯证据，再让本地大模型基于证据流式回答，同时把证据链、导图和审计事件展示出来。</strong>
+      </p>
+      <div class="summary-grid">
+        <article class="card">
+          <strong>产品定位</strong>
+          <p>面向私有资产的端侧知识引擎；<strong>论文仍然是默认演示入口</strong>。</p>
+        </article>
+        <article class="card">
+          <strong>运行边界</strong>
+          <p>模型、索引、图谱和审计日志都优先落本地，API 只接受 loopback 请求。</p>
+        </article>
+        <article class="card">
+          <strong>核心差异</strong>
+          <p>不只做向量检索，还加了关键词、父子切片、图谱上下文和证据门槛。</p>
+        </article>
+        <article class="card">
+          <strong>产品化方向</strong>
+          <p>桌面端自动启动 sidecar，支持随机端口/token、健康监控和便携 U 盘形态。</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>二、总体架构图</h2>
+      <p>
+        这张图按三层阅读：上层是用户桌面体验，中层是 Python sidecar 服务和核心业务，下层是工作区数据与模型资产。
+        关键点是：Tauri 不直接做 RAG，只负责启动和守护后端；真正的知识处理都在 Python sidecar 内。
+      </p>
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 1220 710" role="img" aria-label="SoulDrive 总体架构图">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#52635d"></path>
+            </marker>
+            <marker id="arrow-soft" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#88968f"></path>
+            </marker>
+          </defs>
+
+          <rect class="lane" x="20" y="28" width="1180" height="150" rx="10"></rect>
+          <text class="lane-title" x="42" y="58">桌面体验层：用户交互与 sidecar 管理</text>
+
+          <rect class="box box-green" x="55" y="82" width="250" height="70"></rect>
+          <text class="title" x="75" y="109">React 工作台</text>
+          <text class="small" x="75" y="132">知识文档 / 聊天 / 证据 / 导图 / 审计</text>
+
+          <rect class="box box-gold" x="390" y="82" width="270" height="70"></rect>
+          <text class="title" x="410" y="109">Tauri Rust 壳</text>
+          <text class="small" x="410" y="132">随机端口、API token、进程守护</text>
+
+          <rect class="box box-white" x="745" y="82" width="330" height="70"></rect>
+          <text class="title" x="765" y="109">本地 HTTP/SSE 通道</text>
+          <text class="small" x="765" y="132">fetch + X-SoulDrive-Token + 流式响应</text>
+
+          <path class="arrow" d="M305 117 L390 117"></path>
+          <path class="arrow" d="M660 117 L745 117"></path>
+
+          <rect class="lane" x="20" y="205" width="1180" height="278" rx="10"></rect>
+          <text class="lane-title" x="42" y="235">Python sidecar 服务层：接口、安全、索引、检索、推理</text>
+
+          <rect class="box box-blue" x="55" y="258" width="230" height="78"></rect>
+          <text class="title" x="75" y="286">FastAPI 边界</text>
+          <text class="small" x="75" y="309">loopback / token / CORS / 限流</text>
+          <text class="tiny" x="75" y="328">core/mcp_server.py</text>
+
+          <rect class="box box-violet" x="345" y="258" width="230" height="78"></rect>
+          <text class="title" x="365" y="286">运行态闸门</text>
+          <text class="small" x="365" y="309">locked / auth_level / workspace</text>
+          <text class="tiny" x="365" y="328">core/runtime_state.py</text>
+
+          <rect class="box box-green" x="635" y="258" width="230" height="78"></rect>
+          <text class="title" x="655" y="286">索引 worker</text>
+          <text class="small" x="655" y="309">独立进程解析 PDF 与入库</text>
+          <text class="tiny" x="655" y="328">core/indexer_worker.py</text>
+
+          <rect class="box box-gold" x="925" y="258" width="230" height="78"></rect>
+          <text class="title" x="945" y="286">硬件监听</text>
+          <text class="small" x="945" y="309">U 盘插拔、鉴权、自动入库</text>
+          <text class="tiny" x="945" y="328">core/hardware_watcher.py</text>
+
+          <rect class="box box-green" x="55" y="376" width="230" height="78"></rect>
+          <text class="title" x="75" y="404">LocalKnowledgeBase</text>
+          <text class="small" x="75" y="427">向量 + FTS + 父文档扩展</text>
+          <text class="tiny" x="75" y="446">core/knowledge_base.py</text>
+
+          <rect class="box box-violet" x="345" y="376" width="230" height="78"></rect>
+          <text class="title" x="365" y="404">RAGEngine</text>
+          <text class="small" x="365" y="427">证据门槛 + Prompt + SSE 生成</text>
+          <text class="tiny" x="365" y="446">core/rag_engine.py</text>
+
+          <rect class="box box-blue" x="635" y="376" width="230" height="78"></rect>
+          <text class="title" x="655" y="404">图谱抽取/查询</text>
+          <text class="small" x="655" y="427">实体关系三元组 + 子图补强</text>
+          <text class="tiny" x="655" y="446">graph_extractor.py / graph_db.py</text>
+
+          <rect class="box box-red" x="925" y="376" width="230" height="78"></rect>
+          <text class="title" x="945" y="404">审计与诊断</text>
+          <text class="small" x="945" y="427">hash-chain / metrics / product checks</text>
+          <text class="tiny" x="945" y="446">audit_log.py / diagnostics.py</text>
+
+          <path class="arrow" d="M170 152 L170 258"></path>
+          <path class="arrow" d="M460 152 L460 258"></path>
+          <path class="arrow" d="M285 297 L345 297"></path>
+          <path class="arrow" d="M575 297 L635 297"></path>
+          <path class="arrow-soft" d="M925 297 L865 297"></path>
+          <path class="arrow" d="M285 415 L345 415"></path>
+          <path class="arrow" d="M575 415 L635 415"></path>
+          <path class="arrow-soft" d="M865 415 L925 415"></path>
+
+          <rect class="lane" x="20" y="510" width="1180" height="170" rx="10"></rect>
+          <text class="lane-title" x="42" y="540">本地工作区与模型层：所有关键产物落盘</text>
+
+          <rect class="box box-white" x="55" y="565" width="200" height="72"></rect>
+          <text class="title" x="75" y="592">PDF 知识文档</text>
+          <text class="small" x="75" y="615">data/papers/</text>
+
+          <rect class="box box-white" x="300" y="565" width="220" height="72"></rect>
+          <text class="title" x="320" y="592">向量与切片索引</text>
+          <text class="small" x="320" y="615">Chroma / parent_docs / FTS</text>
+
+          <rect class="box box-white" x="565" y="565" width="200" height="72"></rect>
+          <text class="title" x="585" y="592">SQLite 图谱</text>
+          <text class="small" x="585" y="615">knowledge_graph.sqlite</text>
+
+          <rect class="box box-white" x="810" y="565" width="165" height="72"></rect>
+          <text class="title" x="830" y="592">本地模型</text>
+          <text class="small" x="830" y="615">GGUF + BGE</text>
+
+          <rect class="box box-white" x="1015" y="565" width="150" height="72"></rect>
+          <text class="title" x="1035" y="592">审计日志</text>
+          <text class="small" x="1035" y="615">audit/*.jsonl</text>
+
+          <path class="arrow" d="M750 336 L400 565"></path>
+          <path class="arrow" d="M750 336 L665 565"></path>
+          <path class="arrow" d="M460 454 L410 565"></path>
+          <path class="arrow-soft" d="M460 454 L890 565"></path>
+          <path class="arrow-soft" d="M1040 454 L1090 565"></path>
+        </svg>
+      </div>
+    </section>
+
+    <section>
+      <h2>三、核心业务流程图</h2>
+      <p>
+        项目有两条最重要的链路：一条是知识文档入库/索引链路，另一条是用户提问后的 Hybrid RAG 链路。
+        理解这两条链路，基本就能看懂项目大部分代码。
+      </p>
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 1220 720" role="img" aria-label="SoulDrive 入库和问答流程图">
+          <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#52635d"></path>
+            </marker>
+          </defs>
+
+          <text class="lane-title" x="35" y="42">A. 文档入库与索引流程</text>
+          <rect class="box box-gold" x="35" y="70" width="160" height="70"></rect>
+          <text class="title" x="55" y="98">选择/插入 PDF</text>
+          <text class="tiny" x="55" y="120">UI 或 U 盘根目录</text>
+
+          <rect class="box box-blue" x="235" y="70" width="160" height="70"></rect>
+          <text class="title" x="255" y="98">导入工作区</text>
+          <text class="tiny" x="255" y="120">paper_importer.py</text>
+
+          <rect class="box box-green" x="435" y="70" width="160" height="70"></rect>
+          <text class="title" x="455" y="98">Docling 解析</text>
+          <text class="tiny" x="455" y="120">页码 + Markdown</text>
+
+          <rect class="box box-green" x="635" y="70" width="160" height="70"></rect>
+          <text class="title" x="655" y="98">父子切片</text>
+          <text class="tiny" x="655" y="120">parent/child</text>
+
+          <rect class="box box-blue" x="835" y="70" width="160" height="70"></rect>
+          <text class="title" x="855" y="98">三类索引</text>
+          <text class="tiny" x="855" y="120">Chroma + FTS + 父文档</text>
+
+          <rect class="box box-violet" x="1035" y="70" width="150" height="70"></rect>
+          <text class="title" x="1055" y="98">PRO 图谱</text>
+          <text class="tiny" x="1055" y="120">实体关系落 SQLite</text>
+
+          <path class="arrow" marker-end="url(#arrow2)" d="M195 105 L235 105"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M395 105 L435 105"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M595 105 L635 105"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M795 105 L835 105"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M995 105 L1035 105"></path>
+
+          <rect class="box box-white" x="235" y="180" width="760" height="72"></rect>
+          <text class="title" x="255" y="208">增量策略</text>
+          <text class="small" x="255" y="232">对 PDF 计算 MD5；已是 current 就跳过；metadata_schema_version 过旧则只做升级；索引 worker 独立进程避免阻塞 API。</text>
+
+          <text class="lane-title" x="35" y="315">B. 用户问答与证据生成流程</text>
+          <rect class="box box-gold" x="35" y="345" width="150" height="72"></rect>
+          <text class="title" x="55" y="374">用户提问</text>
+          <text class="tiny" x="55" y="396">React chat</text>
+
+          <rect class="box box-blue" x="225" y="345" width="155" height="72"></rect>
+          <text class="title" x="245" y="374">/chat SSE</text>
+          <text class="tiny" x="245" y="396">mcp_server.py</text>
+
+          <rect class="box box-red" x="420" y="345" width="155" height="72"></rect>
+          <text class="title" x="440" y="374">运行态检查</text>
+          <text class="tiny" x="440" y="396">locked 则拒绝</text>
+
+          <rect class="box box-green" x="615" y="345" width="175" height="72"></rect>
+          <text class="title" x="635" y="374">混合召回</text>
+          <text class="tiny" x="635" y="396">dense + FTS + RRF</text>
+
+          <rect class="box box-violet" x="830" y="345" width="155" height="72"></rect>
+          <text class="title" x="850" y="374">图谱补强</text>
+          <text class="tiny" x="850" y="396">实体匹配 + 子图</text>
+
+          <rect class="box box-green" x="1025" y="345" width="160" height="72"></rect>
+          <text class="title" x="1045" y="374">证据门槛</text>
+          <text class="tiny" x="1045" y="396">低置信度拒答</text>
+
+          <path class="arrow" marker-end="url(#arrow2)" d="M185 381 L225 381"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M380 381 L420 381"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M575 381 L615 381"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M790 381 L830 381"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M985 381 L1025 381"></path>
+
+          <rect class="box box-blue" x="225" y="480" width="210" height="76"></rect>
+          <text class="title" x="245" y="509">Prompt 组装</text>
+          <text class="tiny" x="245" y="531">证据编号 E1/E2 + 图谱关系</text>
+
+          <rect class="box box-violet" x="500" y="480" width="210" height="76"></rect>
+          <text class="title" x="520" y="509">本地 GGUF 推理</text>
+          <text class="tiny" x="520" y="531">llama.cpp GPU smoke + CPU fallback</text>
+
+          <rect class="box box-green" x="775" y="480" width="210" height="76"></rect>
+          <text class="title" x="795" y="509">结构化输出</text>
+          <text class="tiny" x="795" y="531">souldrive-evidence / mindmap</text>
+
+          <rect class="box box-gold" x="500" y="610" width="300" height="76"></rect>
+          <text class="title" x="520" y="639">前端解析与展示</text>
+          <text class="tiny" x="520" y="661">答案正文、证据卡片、可缩放导图、审计事件</text>
+
+          <path class="arrow" marker-end="url(#arrow2)" d="M1105 417 C1105 458 330 438 330 480"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M435 518 L500 518"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M710 518 L775 518"></path>
+          <path class="arrow" marker-end="url(#arrow2)" d="M880 556 C880 605 755 588 735 610"></path>
+        </svg>
+      </div>
+    </section>
+
+    <section>
+      <h2>四、模块拆解：每块在系统里做什么</h2>
+      <div class="three-col">
+        <article class="card">
+          <strong>1. 桌面壳与进程守护</strong>
+          <p><code>souldrive-ui/src-tauri/src/lib.rs</code> 启动 Python sidecar 或已打包的 <code>souldrive-sidecar.exe</code>，为每次桌面运行分配随机端口和随机 API token，并在退出时调用 <code>/shutdown</code>。</p>
+        </article>
+        <article class="card">
+          <strong>2. HTTP API 与安全边界</strong>
+          <p><code>core/mcp_server.py</code> 是接口中心；中间件负责请求体大小、loopback 限制、限流和 token 校验；公开接口只保留健康检查和运行态查询。</p>
+        </article>
+        <article class="card">
+          <strong>3. 工作区抽象</strong>
+          <p><code>core/workspace.py</code> 把知识文档、索引、模型、审计和运行态统一放到 <code>SoulDrive/</code> 或本地 <code>souldrive_db/</code> 下，避免业务代码写死盘符。</p>
+        </article>
+        <article class="card">
+          <strong>4. 文档解析与索引</strong>
+          <p><code>core/indexer.py</code> 管理增量索引；<code>core/document_parser.py</code> 用 Docling 做版面感知解析；入库时写 Chroma、父文档 SQLite 和 FTS5 关键词索引。</p>
+        </article>
+        <article class="card">
+          <strong>5. Hybrid Retrieval</strong>
+          <p><code>core/knowledge_base.py</code> 先做 dense 向量召回和关键词召回，再用 <code>core/retrieval.py</code> 的 RRF、词法重排和图谱分数合成最终证据。</p>
+        </article>
+        <article class="card">
+          <strong>6. 本地图谱</strong>
+          <p><code>core/graph_extractor.py</code> 使用本地 LLM 从片段抽取实体关系；<code>core/graph_db.py</code> 用 SQLite 存节点和边，问答时取一跳子图补充逻辑链。</p>
+        </article>
+        <article class="card">
+          <strong>7. RAG 推理引擎</strong>
+          <p><code>core/rag_engine.py</code> 做证据门槛、Prompt 组装、本地 GGUF 流式生成、引用覆盖审计，并在回答末尾附加 evidence/mindmap 代码块。</p>
+        </article>
+        <article class="card">
+          <strong>8. 审计与诊断</strong>
+          <p><code>core/audit_log.py</code> 用 previous_hash + event_hash 构造 hash-chain；<code>core/diagnostics.py</code> 汇总策略、模型、工作区、审计链和授权状态。</p>
+        </article>
+        <article class="card">
+          <strong>9. React 工作台</strong>
+          <p><code>souldrive-ui/src/App.tsx</code> 轮询运行态、指标、知识文档和审计；解析 <code>souldrive-evidence</code> 与 <code>souldrive-mindmap</code>，渲染证据卡片和可缩放导图。</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>五、设计思路与意图</h2>
+      <div class="two-col">
+        <div class="note">
+          <h3>本地优先，而不是云端 SaaS</h3>
+          <p>项目把知识文档、索引、图谱、审计和模型都放在本地目录。这样牺牲的是初次解析和模型加载速度，换来的是隐私边界清楚、离线可运行和更容易做企业内网部署。</p>
+        </div>
+        <div class="note">
+          <h3>硬件和工作区是运行闸门</h3>
+          <p>可移动存储不仅是数据入口，也是授权/运行态触发器。U 盘插入时解锁并索引，拔出时锁定、停 worker、释放推理资源，意图是把“数据在不在场”变成系统级状态。</p>
+        </div>
+        <div class="note">
+          <h3>检索不是单一路线</h3>
+          <p>向量检索擅长语义相似，FTS/BM25 擅长关键词命中，父子切片解决“短块召回、长块回答”的上下文问题，图谱补充实体关系。这些组合起来比单纯 Chroma RAG 更稳。</p>
+        </div>
+        <div class="note">
+          <h3>回答必须能追溯</h3>
+          <p>RAGEngine 在生成前做 evidence gate，回答中要求用 [E1]、[E2] 标注来源，最后把证据 JSON 返回给前端。这个设计明显是在控制幻觉和提升可审计性。</p>
+        </div>
+        <div class="note">
+          <h3>耗时任务进程隔离</h3>
+          <p>索引 worker 独立进程运行，避免 PDF 解析、嵌入和图谱抽取拖死 API 主进程。Tauri 侧也有 sidecar 健康检查和自动重启。</p>
+        </div>
+        <div class="note">
+          <h3>端侧模型资源要可降级</h3>
+          <p><code>model_runtime.py</code> 会检测 GPU、做 isolated smoke test，失败时回退 CPU。这个设计承认用户硬件差异很大，优先保证可用性。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>六、这个项目的亮点和出彩之处</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>亮点</th>
+            <th>为什么有价值</th>
+            <th>对应代码</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>端侧完整闭环</strong></td>
+            <td>从 PDF 解析、嵌入、检索、图谱、问答到审计都在本地完成，不依赖云端 API 才能跑主链路。</td>
+            <td><code>core/</code>、<code>souldrive-ui/src-tauri/src/lib.rs</code></td>
+          </tr>
+          <tr>
+            <td><strong>父子切片 + 混合检索</strong></td>
+            <td>子块用于精准召回，父块用于回答上下文；dense、FTS、RRF、词法重排和图谱分共同决定证据排序。</td>
+            <td><code>core/parent_child_index.py</code>、<code>core/knowledge_base.py</code>、<code>core/retrieval.py</code></td>
+          </tr>
+          <tr>
+            <td><strong>证据优先的 RAG</strong></td>
+            <td>低证据时拒答，正常回答必须带引用编号，并把证据 JSON 给前端渲染，避免“看起来很会说但没有来源”。</td>
+            <td><code>core/answer_quality.py</code>、<code>core/rag_engine.py</code></td>
+          </tr>
+          <tr>
+            <td><strong>知识图谱是轻量实现</strong></td>
+            <td>没有上来引入 Neo4j/Kuzu，而是用 SQLite 存实体和关系，先把 GraphRAG 的产品价值跑通，复杂度控制得住。</td>
+            <td><code>core/graph_extractor.py</code>、<code>core/graph_db.py</code></td>
+          </tr>
+          <tr>
+            <td><strong>便携工作区设计</strong></td>
+            <td>本地模式和 U 盘模式共用 <code>SoulDriveWorkspace</code> 抽象，避免业务逻辑到处拼路径或依赖固定盘符。</td>
+            <td><code>core/workspace.py</code>、<code>core/hardware_watcher.py</code></td>
+          </tr>
+          <tr>
+            <td><strong>桌面 sidecar 工程化</strong></td>
+            <td>Tauri 管随机 token、随机端口、健康检查、重启和退出清理；这比“前端假设 localhost:8000 永远存在”可靠得多。</td>
+            <td><code>souldrive-ui/src-tauri/src/lib.rs</code></td>
+          </tr>
+          <tr>
+            <td><strong>hash-chain 审计</strong></td>
+            <td>审计事件有前后哈希链，可检测篡改；对本地知识系统来说，这是产品可信度的加分项。</td>
+            <td><code>core/audit_log.py</code></td>
+          </tr>
+          <tr>
+            <td><strong>测试覆盖方向正确</strong></td>
+            <td>测试不只测小函数，也覆盖路径、锁定状态、索引范围、API 安全、图谱、检索、模型运行和打包脚本。</td>
+            <td><code>tests/</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>七、建议你按这个顺序快速浏览代码</h2>
+      <div class="read-path">
+        <div class="step">
+          <div>
+            <strong><code>README.md</code> 和 <code>AGENTS.md</code></strong>
+            <p>先看项目目标、工作区约定、运行命令和边界规则。尤其注意项目推荐使用名为 <code>souldrive</code> 的 Conda 环境。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>souldrive-ui/src-tauri/src/lib.rs</code></strong>
+            <p>理解桌面端如何启动 sidecar、传入 <code>SOULDRIVE_API_TOKEN</code>/<code>SOULDRIVE_API_PORT</code>、健康检查和退出清理。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>core/sidecar_runtime.py</code> 与 <code>core/mcp_server.py</code></strong>
+            <p>这是后端入口和 API 中心。重点看 <code>/chat</code>、<code>/documents/import</code>、<code>/index/run</code>、<code>/runtime/status</code> 和中间件；<code>/papers/*</code> 作为兼容层保留。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>core/workspace.py</code>、<code>core/runtime_state.py</code>、<code>core/hardware_watcher.py</code></strong>
+            <p>理解“工作区在哪里”“什么时候 locked/unlocked”“U 盘插拔怎么影响系统”。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>core/indexer.py</code>、<code>core/document_parser.py</code>、<code>core/knowledge_base.py</code></strong>
+            <p>这是知识文档入库主线。重点看 MD5 增量、Docling 解析、父子切片、Chroma/FTS/parent docs 写入。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>core/retrieval.py</code>、<code>core/rag_engine.py</code>、<code>core/answer_quality.py</code></strong>
+            <p>这是问答质量主线。重点看混合排序、证据构造、证据门槛、Prompt 约束和流式生成。</p>
+          </div>
+        </div>
+        <div class="step">
+          <div>
+            <strong><code>souldrive-ui/src/App.tsx</code></strong>
+            <p>最后看 UI 如何轮询状态、导入文档、启动索引、消费 SSE，并解析 <code>souldrive-evidence</code>/<code>souldrive-mindmap</code>。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>八、关键文件速查表</h2>
+      <table class="file-list">
+        <thead>
+          <tr>
+            <th>文件</th>
+            <th>作用</th>
+            <th>建议看什么</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>core/mcp_server.py</td>
+            <td>FastAPI 服务、接口中心、安全中间件、RAG 懒加载、索引 worker 启停。</td>
+            <td><span class="badge">先看</span> <code>enterprise_boundary_middleware</code>、<code>chat_stream</code>、<code>index_run</code>。</td>
+          </tr>
+          <tr>
+            <td>core/sidecar_runtime.py</td>
+            <td>Python sidecar 进程入口，配置日志、监听父进程、启动 uvicorn 和 U 盘 watcher。</td>
+            <td>看 <code>main()</code> 如何区分 API、indexer、gpu-smoke 三种模式。</td>
+          </tr>
+          <tr>
+            <td>core/workspace.py</td>
+            <td>工作区路径规范，统一 data/papers、index、audit、models、runtime；其中 data/papers 当前仍承载 PDF 知识文档。</td>
+            <td>看 <code>SoulDriveWorkspace.ensure()</code> 和 <code>resolve_workspace()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/hardware_watcher.py</td>
+            <td>可移动盘监听、工作区准备、授权判断、自动启动索引。</td>
+            <td>看 <code>monitor_loop()</code> 的插入/拔出两个分支。</td>
+          </tr>
+          <tr>
+            <td>core/indexer.py</td>
+            <td>增量索引管道，负责解析、清理旧索引、写入知识库和图谱抽取。</td>
+            <td>看 <code>sync_workspace()</code>，这是入库主流程。</td>
+          </tr>
+          <tr>
+            <td>core/document_parser.py</td>
+            <td>Docling 版面感知 PDF 解析，输出带页码 metadata 的 Markdown 切片。</td>
+            <td>看 <code>parse_and_chunk()</code> 和 <code>_split_page_markdown()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/knowledge_base.py</td>
+            <td>Chroma、父文档 SQLite、FTS5 关键词索引的统一封装。</td>
+            <td>看 <code>ingest_chunks()</code> 和 <code>search_with_evidence()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/retrieval.py</td>
+            <td>BM25、RRF、词法重排、引用构造。</td>
+            <td>看 <code>rank_hybrid_candidates()</code> 和 <code>build_citations()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/rag_engine.py</td>
+            <td>RAG 编排：召回、证据门槛、Prompt、llama.cpp 流式输出、导图和证据块。</td>
+            <td>看 <code>generate_response_stream()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/graph_extractor.py</td>
+            <td>本地 LLM 抽取实体和关系，写入 SQLite 图谱。</td>
+            <td>看 <code>extract_chunks()</code> 和 <code>_parse_llm_json()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/graph_db.py</td>
+            <td>轻量图数据库实现，实体表、关系表和一跳/多跳子图查询。</td>
+            <td>看 <code>get_all_entities()</code>、<code>get_subgraph()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/model_runtime.py</td>
+            <td>本地 GGUF 模型选择、GPU offload 策略、smoke test 和 CPU fallback。</td>
+            <td>看 <code>llama_runtime_config()</code>、<code>load_llama_with_gpu_fallback()</code>。</td>
+          </tr>
+          <tr>
+            <td>core/audit_log.py</td>
+            <td>hash-chain 审计日志，记录运行、检索、回答、错误等事件。</td>
+            <td>看 <code>append_event()</code> 和 <code>verify_chain()</code>。</td>
+          </tr>
+          <tr>
+            <td>souldrive-ui/src/App.tsx</td>
+            <td>React 主界面，管理知识文档、状态面板、聊天、证据卡片、导图和审计。</td>
+            <td>看 <code>submitQuery()</code>、<code>parseMessageArtifacts()</code>、<code>GraphPanel</code>。</td>
+          </tr>
+          <tr>
+            <td>souldrive-ui/src-tauri/src/lib.rs</td>
+            <td>Tauri 主壳，启动/守护 sidecar，暴露 runtime_config 和文件选择命令。</td>
+            <td>看 <code>spawn_backend()</code>、<code>sidecar_health_monitor()</code>。</td>
+          </tr>
+          <tr>
+            <td>tests/</td>
+            <td>后端核心逻辑回归测试。</td>
+            <td>优先看 <code>test_mcp_server_*.py</code>、<code>test_retrieval.py</code>、<code>test_indexer_scope.py</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>九、当前实现边界和需要注意的地方</h2>
+      <div class="two-col">
+        <div class="note warning">
+          <h3>本地模型是硬依赖</h3>
+          <p>嵌入模型 <code>bge-small-zh-v1.5</code> 和 GGUF 聊天模型需要在模型搜索目录里存在。缺模型时，RAG 主链路会在加载阶段失败。</p>
+        </div>
+        <div class="note warning">
+          <h3>图谱抽取成本较高</h3>
+          <p>图谱抽取会调用本地 LLM，所以代码限制每篇文档抽取的片段数，并且只有 <code>PRO</code> 授权级别才会执行高级图谱抽取。</p>
+        </div>
+        <div class="note warning">
+          <h3>便携形态仍要关注打包体积</h3>
+          <p><code>scripts/package-sidecar.ps1</code> 已经在收集 Docling、OCR、Chroma、transformers、llama_cpp 等依赖后做瘦身，但 sidecar 体积和模型体积仍然是产品交付重点。</p>
+        </div>
+        <div class="note warning">
+          <h3>开发脚本依赖本机环境变量</h3>
+          <p>运行脚本时建议显式设置 <code>SOULDRIVE_PYTHON</code>，并使用名为 <code>souldrive</code> 的 Conda 环境；不要把个人机器解释器路径写入公开文档或业务代码。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>十、最短理解路线</h2>
+      <ol>
+        <li>先把它理解成“面向私有资产的本地知识引擎”，不是联网聊天应用；论文是当前默认演示入口。</li>
+        <li>再记住三件事：<code>workspace</code> 管数据位置，<code>mcp_server</code> 管接口，<code>RAGEngine</code> 管问答。</li>
+        <li>入库看 <code>indexer.py</code>，问答看 <code>rag_engine.py</code>，桌面启动看 <code>src-tauri/src/lib.rs</code>。</li>
+        <li>项目最出彩的地方是“工程闭环”：本地模型、工作区、索引、证据、图谱、审计、桌面 sidecar 都已经有明确边界。</li>
+      </ol>
+    </section>
+  </main>
+</body>
+</html>

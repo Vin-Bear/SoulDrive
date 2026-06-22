@@ -1,11 +1,11 @@
 # SoulDrive
 
-SoulDrive 是一个端侧论文知识工作台，核心目标是把本地论文解析、索引、检索增强生成、证据链和知识图谱先打磨稳定。当前阶段只关注项目本身的运行逻辑。
+SoulDrive 是一个面向私有资产的端侧知识引擎，核心目标是把本地知识文档的解析、索引、检索增强生成、证据链和知识图谱打磨稳定。当前演示与测试仍以论文作为默认切入口，但系统能力不局限于论文场景。
 
 ## 核心模块
 
 - `core/`：本地 sidecar、工作区管理、文档解析、索引、检索、RAG、审计日志、模型运行配置。
-- `souldrive-ui/`：React + Tauri 桌面界面，用于展示论文库、运行态、问答、证据链和导图。
+- `souldrive-ui/`：React + Tauri 桌面界面，用于展示知识文档、运行态、问答、证据链和导图。
 - `tests/`：后端核心逻辑的 `unittest` 测试。
 - `config/enterprise-policy.json`：本地运行策略，保留 API 限流、CORS、lite/license 等基础约束。
 
@@ -83,7 +83,7 @@ cargo check
 
 SoulDrive 会在本地或授权存储中维护 `SoulDrive/` 工作区：
 
-- `data/papers/`：待解析论文。
+- `data/papers/`：当前默认存放 PDF 知识文档，演示阶段仍以论文为主。
 - `index/`：Chroma、父子切片索引、关键词索引。
 - `graph/`：本地图数据库。
 - `audit/`：hash-chain 审计日志。
