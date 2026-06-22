@@ -101,7 +101,7 @@ interface RuntimeMetrics {
   last_error?: string | null;
 }
 
-interface PaperItem {
+interface DocumentItem {
   name: string;
   relative_path: string;
   size_bytes: number;
@@ -109,15 +109,15 @@ interface PaperItem {
   indexed: boolean;
 }
 
-interface PaperLibrary {
+interface DocumentLibrary {
   ready: boolean;
-  paper_count: number;
+  document_count: number;
   indexed_count: number;
   workspace: string;
-  papers: PaperItem[];
+  documents: DocumentItem[];
 }
 
-interface PaperImportResponse {
+interface DocumentImportResponse {
   imported_count: number;
   items: Array<{
     name: string;
@@ -229,10 +229,10 @@ const GRAPH_BUTTON_ZOOM_STEP = 0.12;
 const PAPERS_PER_PAGE = 5;
 
 const promptTemplates = [
-  "请归纳这批论文的核心问题、方法路线和结论差异，并给出引用依据。",
-  "请对比近三篇相关论文的方法、数据集、指标和局限性。",
-  "请生成一个围绕该研究方向的技术路线图，并标注关键论文来源。",
-  "请从企业落地角度评估这些论文方法的可复现性、成本和风险。",
+  "请归纳这批论文或技术资料的核心主题、关键结论和差异，并给出引用依据。",
+  "请对比近三份技术文档、研究论文或项目方案的目标、实现路径、约束和风险。",
+  "请生成一个围绕当前资料库的技术路线图，并标注关键来源。",
+  "请从企业落地角度评估这些资料对应方案的可复用性、成本和实施风险。",
 ];
 
 function cleanMindmapTitle(value: string) {
@@ -409,7 +409,7 @@ function formatBytes(value?: number) {
   return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function formatPaperTime(timestamp?: number) {
+function formatDocumentTime(timestamp?: number) {
   if (!timestamp) return "--";
   return new Date(timestamp * 1000).toLocaleDateString("zh-CN", {
     month: "2-digit",
@@ -451,14 +451,14 @@ export default function App() {
   const [healthStatus, setHealthStatus] = useState<HealthStatus>({ sidecar: "BOOTING", ready: false });
   const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(null);
   const [productDiagnostics, setProductDiagnostics] = useState<ProductDiagnostics | null>(null);
-  const [paperLibrary, setPaperLibrary] = useState<PaperLibrary | null>(null);
-  const [paperPage, setPaperPage] = useState(1);
+  const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrary | null>(null);
+  const [documentPage, setDocumentPage] = useState(1);
   const [apiToken, setApiToken] = useState<string | null>(null);
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL);
   const [runtimeConfigLoaded, setRuntimeConfigLoaded] = useState(false);
   const [indexStartStatus, setIndexStartStatus] = useState<"idle" | "starting" | "error">("idle");
-  const [paperImportStatus, setPaperImportStatus] = useState<"idle" | "selecting" | "importing" | "error">("idle");
-  const [paperImportMessage, setPaperImportMessage] = useState("");
+  const [documentImportStatus, setDocumentImportStatus] = useState<"idle" | "selecting" | "importing" | "error">("idle");
+  const [documentImportMessage, setDocumentImportMessage] = useState("");
   const [artifactTab, setArtifactTab] = useState<"evidence" | "graph" | "audit">("evidence");
   const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -493,13 +493,13 @@ export default function App() {
     return buildMindmapLayout(latestMindmap.nodes, collapsedNodeIds);
   }, [latestMindmap, collapsedNodeIds]);
 
-  const papers = paperLibrary?.papers ?? [];
-  const totalPaperPages = Math.max(1, Math.ceil(papers.length / PAPERS_PER_PAGE));
-  const activePaperPage = Math.min(paperPage, totalPaperPages);
-  const visiblePapers = useMemo(() => {
-    const start = (activePaperPage - 1) * PAPERS_PER_PAGE;
-    return papers.slice(start, start + PAPERS_PER_PAGE);
-  }, [activePaperPage, papers]);
+  const documents = documentLibrary?.documents ?? [];
+  const totalDocumentPages = Math.max(1, Math.ceil(documents.length / PAPERS_PER_PAGE));
+  const activeDocumentPage = Math.min(documentPage, totalDocumentPages);
+  const visibleDocuments = useMemo(() => {
+    const start = (activeDocumentPage - 1) * PAPERS_PER_PAGE;
+    return documents.slice(start, start + PAPERS_PER_PAGE);
+  }, [activeDocumentPage, documents]);
   const locked = runtimeStatus?.locked ?? true;
   const indexingStatus = runtimeStatus?.indexing?.status || "idle";
   const indexBusy = ["queued", "scanning", "indexing"].includes(indexingStatus);
@@ -513,8 +513,8 @@ export default function App() {
   }, [latestMindmap?.raw]);
 
   useEffect(() => {
-    setPaperPage(1);
-  }, [paperLibrary?.paper_count]);
+    setDocumentPage(1);
+  }, [documentLibrary?.document_count]);
 
   useEffect(() => {
     let isMounted = true;
@@ -621,16 +621,16 @@ export default function App() {
       }
     };
 
-    const refreshPaperLibrary = async () => {
+    const refreshDocumentLibrary = async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/papers/list`, {
+        const response = await fetch(`${apiBaseUrl}/documents/list`, {
           headers: apiToken ? { "X-SoulDrive-Token": apiToken } : undefined,
         });
-        if (!response.ok) throw new Error("papers unavailable");
+        if (!response.ok) throw new Error("documents unavailable");
         const data = await response.json();
-        if (isMounted) setPaperLibrary(data);
+        if (isMounted) setDocumentLibrary(data);
       } catch {
-        if (isMounted) setPaperLibrary(null);
+        if (isMounted) setDocumentLibrary(null);
       }
     };
 
@@ -639,14 +639,14 @@ export default function App() {
     void refreshProductHealth();
     void refreshMetrics();
     void refreshProductDiagnostics();
-    void refreshPaperLibrary();
+    void refreshDocumentLibrary();
     const timer = window.setInterval(() => {
       void refreshRuntimeStatus();
       void refreshAuditEvents();
       void refreshProductHealth();
       void refreshMetrics();
       void refreshProductDiagnostics();
-      void refreshPaperLibrary();
+      void refreshDocumentLibrary();
     }, 3000);
 
     return () => {
@@ -753,20 +753,20 @@ export default function App() {
     }
   };
 
-  const importPapers = async () => {
-    if (locked || paperImportStatus === "selecting" || paperImportStatus === "importing") return;
-    setPaperImportStatus("selecting");
-    setPaperImportMessage("");
+  const importDocuments = async () => {
+    if (locked || documentImportStatus === "selecting" || documentImportStatus === "importing") return;
+    setDocumentImportStatus("selecting");
+    setDocumentImportMessage("");
 
     try {
       const sourcePaths = await invoke<string[]>("select_pdf_files");
       if (!sourcePaths.length) {
-        setPaperImportStatus("idle");
+        setDocumentImportStatus("idle");
         return;
       }
 
-      setPaperImportStatus("importing");
-      const response = await fetch(`${apiBaseUrl}/papers/import`, {
+      setDocumentImportStatus("importing");
+      const response = await fetch(`${apiBaseUrl}/documents/import`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -774,21 +774,21 @@ export default function App() {
         },
         body: JSON.stringify({ source_paths: sourcePaths }),
       });
-      if (!response.ok) throw new Error("paper import failed");
+      if (!response.ok) throw new Error("document import failed");
 
-      const payload = await response.json() as PaperImportResponse;
-      setPaperImportMessage(`导入 ${payload.imported_count}/${payload.items.length} 篇`);
-      setPaperImportStatus("idle");
+      const payload = await response.json() as DocumentImportResponse;
+      setDocumentImportMessage(`导入 ${payload.imported_count}/${payload.items.length} 份`);
+      setDocumentImportStatus("idle");
 
-      const listResponse = await fetch(`${apiBaseUrl}/papers/list`, {
+      const listResponse = await fetch(`${apiBaseUrl}/documents/list`, {
         headers: apiToken ? { "X-SoulDrive-Token": apiToken } : undefined,
       });
       if (listResponse.ok) {
-        setPaperLibrary(await listResponse.json());
+        setDocumentLibrary(await listResponse.json());
       }
     } catch {
-      setPaperImportStatus("error");
-      setPaperImportMessage("导入失败");
+      setDocumentImportStatus("error");
+      setDocumentImportMessage("导入失败");
     }
   };
 
@@ -813,7 +813,7 @@ export default function App() {
           </div>
           <div>
             <h1>灵枢 SoulDrive</h1>
-            <span>端侧论文知识工作台</span>
+            <span>面向私有资产的端侧知识引擎</span>
           </div>
         </div>
 
@@ -835,11 +835,11 @@ export default function App() {
             <div className="panel-title">
               <span>
                 <FileText size={15} />
-                论文库
+                知识文档
               </span>
               <button
                 type="button"
-                title={indexBusy ? "索引任务运行中" : "更新论文索引"}
+                title={indexBusy ? "索引任务运行中" : "更新知识索引"}
                 disabled={locked || indexBusy || indexStartStatus === "starting"}
                 onClick={() => void startIndexing()}
               >
@@ -847,20 +847,20 @@ export default function App() {
               </button>
               <button
                 type="button"
-                title="导入 PDF 论文"
-                disabled={locked || paperImportStatus === "selecting" || paperImportStatus === "importing"}
-                onClick={() => void importPapers()}
+                title="导入 PDF 文档"
+                disabled={locked || documentImportStatus === "selecting" || documentImportStatus === "importing"}
+                onClick={() => void importDocuments()}
               >
                 <Upload size={15} />
               </button>
             </div>
             <div className="library-summary">
               <div>
-                <strong>{paperLibrary?.paper_count ?? runtimeStatus?.indexing?.discovered_files ?? 0}</strong>
-                <span>篇论文</span>
+                <strong>{documentLibrary?.document_count ?? runtimeStatus?.indexing?.discovered_files ?? 0}</strong>
+                <span>份文档</span>
               </div>
               <div>
-                <strong>{paperLibrary?.indexed_count ?? runtimeStatus?.indexing?.skipped_files ?? 0}</strong>
+                <strong>{documentLibrary?.indexed_count ?? runtimeStatus?.indexing?.skipped_files ?? 0}</strong>
                 <span>已索引</span>
               </div>
             </div>
@@ -870,31 +870,31 @@ export default function App() {
                 {runtimeStatus?.indexing?.processed_files ?? 0}/{runtimeStatus?.indexing?.total_files ?? 0}
               </strong>
             </div>
-            {paperImportMessage && (
-              <div className={`indexing-strip ${paperImportStatus === "error" ? "warn" : "active"}`}>
-                <span>{paperImportMessage}</span>
-                <strong>{paperImportStatus === "importing" ? "..." : ""}</strong>
+            {documentImportMessage && (
+              <div className={`indexing-strip ${documentImportStatus === "error" ? "warn" : "active"}`}>
+                <span>{documentImportMessage}</span>
+                <strong>{documentImportStatus === "importing" ? "..." : ""}</strong>
               </div>
             )}
             <div className="paper-list">
-              {paperLibrary?.papers?.length ? (
-                visiblePapers.map((paper) => (
-                  <section key={paper.relative_path} className="paper-row">
+              {documentLibrary?.documents?.length ? (
+                visibleDocuments.map((document) => (
+                  <section key={document.relative_path} className="paper-row">
                     <div className="paper-row-main">
                       <FileText size={14} />
-                      <strong title={paper.name}>{paper.name}</strong>
+                      <strong title={document.name}>{document.name}</strong>
                     </div>
                     <div className="paper-row-meta">
-                      <span>{formatBytes(paper.size_bytes)}</span>
-                      <span>{formatPaperTime(paper.modified_at)}</span>
-                      <span className={paper.indexed ? "indexed" : ""}>{paper.indexed ? "已索引" : "待索引"}</span>
+                      <span>{formatBytes(document.size_bytes)}</span>
+                      <span>{formatDocumentTime(document.modified_at)}</span>
+                      <span className={document.indexed ? "indexed" : ""}>{document.indexed ? "已索引" : "待索引"}</span>
                     </div>
                   </section>
                 ))
               ) : (
                 <div className="paper-empty">
                   <FileText size={28} />
-                  <span>暂无论文</span>
+                  <span>暂无文档</span>
                 </div>
               )}
             </div>
@@ -902,17 +902,17 @@ export default function App() {
               <button
                 type="button"
                 title="上一页"
-                disabled={activePaperPage <= 1}
-                onClick={() => setPaperPage((page) => Math.max(1, page - 1))}
+                disabled={activeDocumentPage <= 1}
+                onClick={() => setDocumentPage((page) => Math.max(1, page - 1))}
               >
                 <ChevronLeft size={15} />
               </button>
-              <span>{activePaperPage} / {totalPaperPages}</span>
+              <span>{activeDocumentPage} / {totalDocumentPages}</span>
               <button
                 type="button"
                 title="下一页"
-                disabled={activePaperPage >= totalPaperPages}
-                onClick={() => setPaperPage((page) => Math.min(totalPaperPages, page + 1))}
+                disabled={activeDocumentPage >= totalDocumentPages}
+                onClick={() => setDocumentPage((page) => Math.min(totalDocumentPages, page + 1))}
               >
                 <ChevronRight size={15} />
               </button>
@@ -989,9 +989,9 @@ export default function App() {
             <div>
               <span>
                 <FileText size={14} />
-                Local Paper RAG
+                Local Knowledge Engine
               </span>
-              <h2>论文归纳与智能问答</h2>
+              <h2>私有知识问答与分析</h2>
             </div>
             <div className="model-badge">
               <KeyRound size={14} />
@@ -1033,7 +1033,7 @@ export default function App() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               disabled={isGenerating || locked}
-              placeholder={locked ? "授权移动存储未就绪，知识引擎已锁定" : isGenerating ? "端侧模型生成中..." : "输入论文归纳、对比、综述或问答任务"}
+              placeholder={locked ? "授权移动存储未就绪，知识引擎已锁定" : isGenerating ? "端侧模型生成中..." : "输入文档归纳、对比、方案分析或问答任务"}
             />
             <button type="submit" disabled={!input.trim() || isGenerating || locked} title="发送">
               <Send size={17} />
@@ -1091,7 +1091,7 @@ function EvidencePanel({ evidence }: { evidence: EvidenceItem[] }) {
       <div className="studio-empty">
         <ClipboardList size={42} />
         <h3>等待证据链</h3>
-        <p>完成一次论文问答后，这里会显示检索片段、来源文件和重排分。</p>
+        <p>完成一次知识问答后，这里会显示检索片段、来源文件和重排分。</p>
       </div>
     );
   }
