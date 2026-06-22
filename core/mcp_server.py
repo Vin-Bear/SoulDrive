@@ -345,49 +345,27 @@ async def ready():
 async def runtime_status():
     return public_runtime_state()
 
+@app.get("/documents/list")
+async def documents_list():
+    return _document_library_payload(current_workspace())
+
+
+@app.post("/documents/import")
+async def documents_import(request: PaperImportRequest):
+    return _import_documents(request)
+
+
 @app.get("/papers/list")
 async def papers_list():
-    workspace = current_workspace()
-    papers_dir = Path(workspace.papers_path)
-    indexed_sources = _indexed_source_filenames(workspace)
-    papers = []
-
-    for path in sorted(papers_dir.rglob("*.pdf"), key=lambda item: item.name.lower()):
-        stat = path.stat()
-        papers.append({
-            "name": path.name,
-            "relative_path": path.relative_to(papers_dir).as_posix(),
-            "size_bytes": stat.st_size,
-            "modified_at": stat.st_mtime,
-            "indexed": path.name in indexed_sources,
-        })
-
-    return {
-        "ready": True,
-        "paper_count": len(papers),
-        "indexed_count": sum(1 for paper in papers if paper["indexed"]),
-        "workspace": "SoulDrive workspace mounted",
-        "papers": papers,
-    }
+    payload = _document_library_payload(current_workspace())
+    payload["paper_count"] = payload["document_count"]
+    payload["papers"] = payload["documents"]
+    return payload
 
 
 @app.post("/papers/import")
 async def papers_import(request: PaperImportRequest):
-    state = get_runtime_state()
-    if state.get("locked"):
-        return JSONResponse(
-            {"error": "SoulDrive workspace is locked", "status": "locked"},
-            status_code=423,
-        )
-
-    workspace = current_workspace()
-    items = [import_paper_into_workspace(workspace, source_path) for source_path in request.source_paths]
-    return {
-        "ready": True,
-        "imported_count": sum(1 for item in items if item["status"] == "imported"),
-        "items": items,
-        "workspace": "SoulDrive workspace mounted",
-    }
+    return _import_documents(request)
 
 
 @app.post("/index/run")
@@ -465,6 +443,48 @@ def _indexed_source_filenames(workspace: SoulDriveWorkspace) -> set[str]:
         return set()
 
     return {str(row[0]) for row in rows if row and row[0]}
+
+
+def _document_library_payload(workspace: SoulDriveWorkspace) -> dict:
+    documents_dir = Path(workspace.papers_path)
+    indexed_sources = _indexed_source_filenames(workspace)
+    documents = []
+
+    for path in sorted(documents_dir.rglob("*.pdf"), key=lambda item: item.name.lower()):
+        stat = path.stat()
+        documents.append({
+            "name": path.name,
+            "relative_path": path.relative_to(documents_dir).as_posix(),
+            "size_bytes": stat.st_size,
+            "modified_at": stat.st_mtime,
+            "indexed": path.name in indexed_sources,
+        })
+
+    return {
+        "ready": True,
+        "document_count": len(documents),
+        "indexed_count": sum(1 for document in documents if document["indexed"]),
+        "workspace": "SoulDrive workspace mounted",
+        "documents": documents,
+    }
+
+
+def _import_documents(request: PaperImportRequest):
+    state = get_runtime_state()
+    if state.get("locked"):
+        return JSONResponse(
+            {"error": "SoulDrive workspace is locked", "status": "locked"},
+            status_code=423,
+        )
+
+    workspace = current_workspace()
+    items = [import_paper_into_workspace(workspace, source_path) for source_path in request.source_paths]
+    return {
+        "ready": True,
+        "imported_count": sum(1 for item in items if item["status"] == "imported"),
+        "items": items,
+        "workspace": "SoulDrive workspace mounted",
+    }
 
 
 tool_registry = build_default_tool_registry(

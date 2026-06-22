@@ -12,7 +12,7 @@ from core.workspace import SoulDriveWorkspace
 
 
 class McpServerPapersTests(unittest.TestCase):
-    def test_papers_list_reads_only_workspace_papers_directory(self):
+    def test_documents_list_reads_only_workspace_documents_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
             managed = Path(workspace.papers_path) / "managed.pdf"
@@ -36,18 +36,17 @@ class McpServerPapersTests(unittest.TestCase):
                 clear=False,
             ):
                 response = TestClient(mcp_server.app).get(
-                    "/papers/list",
+                    "/documents/list",
                     headers={"X-SoulDrive-Token": "test-token"},
                 )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["paper_count"], 1)
-        self.assertEqual(payload["indexed_count"], 1)
-        self.assertEqual(payload["papers"][0]["name"], "managed.pdf")
-        self.assertTrue(payload["papers"][0]["indexed"])
+        self.assertEqual(payload["document_count"], 1)
+        self.assertEqual(payload["documents"][0]["name"], "managed.pdf")
+        self.assertTrue(payload["documents"][0]["indexed"])
 
-    def test_papers_import_copies_pdf_into_active_workspace(self):
+    def test_documents_import_copies_pdf_into_active_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
             source_dir = Path(temp_dir) / "incoming"
@@ -66,7 +65,7 @@ class McpServerPapersTests(unittest.TestCase):
             ):
                 runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
                 response = TestClient(mcp_server.app).post(
-                    "/papers/import",
+                    "/documents/import",
                     json={"source_paths": [str(source_pdf)]},
                     headers={"X-SoulDrive-Token": "test-token"},
                 )
@@ -78,6 +77,27 @@ class McpServerPapersTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["status"], "imported")
         self.assertEqual(payload["items"][0]["name"], "paper.pdf")
         self.assertTrue(imported_pdf_exists)
+
+    def test_papers_list_keeps_legacy_response_shape(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            legacy = Path(workspace.papers_path) / "legacy.pdf"
+            legacy.write_bytes(b"%PDF legacy")
+
+            with patch("core.mcp_server.current_workspace", return_value=workspace), patch.dict(
+                "os.environ",
+                {"SOULDRIVE_API_TOKEN": "test-token"},
+                clear=False,
+            ):
+                response = TestClient(mcp_server.app).get(
+                    "/papers/list",
+                    headers={"X-SoulDrive-Token": "test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("paper_count", payload)
+        self.assertIn("papers", payload)
 
     def test_papers_import_rejects_non_pdf_without_copying(self):
         with tempfile.TemporaryDirectory() as temp_dir:
