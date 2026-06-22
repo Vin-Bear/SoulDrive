@@ -126,6 +126,14 @@ interface DocumentImportResponse {
   }>;
 }
 
+interface SecurityStatus {
+  crypto_initialized: boolean;
+  software_unlocked: boolean;
+  hardware_mounted: boolean;
+  reason?: string;
+  no_recovery: boolean;
+}
+
 interface ProductDiagnostics {
   ready: boolean;
   checks: Record<string, boolean>;
@@ -452,6 +460,12 @@ export default function App() {
   const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(null);
   const [productDiagnostics, setProductDiagnostics] = useState<ProductDiagnostics | null>(null);
   const [documentLibrary, setDocumentLibrary] = useState<DocumentLibrary | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmPassphrase, setConfirmPassphrase] = useState("");
+  const [acknowledgeNoRecovery, setAcknowledgeNoRecovery] = useState(false);
+  const [securityMessage, setSecurityMessage] = useState("");
+  const [securityBusy, setSecurityBusy] = useState(false);
   const [documentPage, setDocumentPage] = useState(1);
   const [apiToken, setApiToken] = useState<string | null>(null);
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL);
@@ -634,12 +648,26 @@ export default function App() {
       }
     };
 
+    const refreshSecurityStatus = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/security/status`, {
+          headers: apiToken ? { "X-SoulDrive-Token": apiToken } : undefined,
+        });
+        if (!response.ok) throw new Error("security unavailable");
+        const data = await response.json();
+        if (isMounted) setSecurityStatus(data);
+      } catch {
+        if (isMounted) setSecurityStatus(null);
+      }
+    };
+
     void refreshRuntimeStatus();
     void refreshAuditEvents();
     void refreshProductHealth();
     void refreshMetrics();
     void refreshProductDiagnostics();
     void refreshDocumentLibrary();
+    void refreshSecurityStatus();
     const timer = window.setInterval(() => {
       void refreshRuntimeStatus();
       void refreshAuditEvents();
@@ -647,6 +675,7 @@ export default function App() {
       void refreshMetrics();
       void refreshProductDiagnostics();
       void refreshDocumentLibrary();
+      void refreshSecurityStatus();
     }, 3000);
 
     return () => {
@@ -673,6 +702,21 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  const refreshSecurityAfterChange = async () => {
+    try {
+      const [runtimeResponse, securityResponse] = await Promise.all([
+        fetch(`${apiBaseUrl}/runtime/status`),
+        fetch(`${apiBaseUrl}/security/status`, {
+          headers: apiToken ? { "X-SoulDrive-Token": apiToken } : undefined,
+        }),
+      ]);
+      if (runtimeResponse.ok) setRuntimeStatus(await runtimeResponse.json());
+      if (securityResponse.ok) setSecurityStatus(await securityResponse.json());
+    } catch {
+      // Polling will retry shortly; keep the UI responsive after submit.
+    }
   };
 
   const submitQuery = async (query: string) => {
@@ -792,6 +836,69 @@ export default function App() {
     }
   };
 
+  const setupWorkspaceSecurity = async () => {
+    if (securityBusy) return;
+    if (passphrase.length < 8) {
+      setSecurityMessage("口令至少需要 8 个字符");
+      return;
+    }
+    if (passphrase !== confirmPassphrase) {
+      setSecurityMessage("两次输入的口令不一致");
+      return;
+    }
+    if (!acknowledgeNoRecovery) {
+      setSecurityMessage("请先确认忘记口令不可恢复");
+      return;
+    }
+
+    setSecurityBusy(true);
+    setSecurityMessage("");
+    try {
+      const response = await fetch(`${apiBaseUrl}/security/init`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiToken ? { "X-SoulDrive-Token": apiToken } : {}),
+        },
+        body: JSON.stringify({ passphrase, acknowledge_no_recovery: acknowledgeNoRecovery }),
+      });
+      if (!response.ok) throw new Error("security init failed");
+      setPassphrase("");
+      setConfirmPassphrase("");
+      setAcknowledgeNoRecovery(false);
+      setSecurityMessage("工作区已初始化并解锁");
+      await refreshSecurityAfterChange();
+    } catch {
+      setSecurityMessage("初始化失败，请检查本地服务状态");
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
+  const unlockWorkspaceSecurity = async () => {
+    if (securityBusy || !passphrase) return;
+    setSecurityBusy(true);
+    setSecurityMessage("");
+    try {
+      const response = await fetch(`${apiBaseUrl}/security/unlock`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiToken ? { "X-SoulDrive-Token": apiToken } : {}),
+        },
+        body: JSON.stringify({ passphrase }),
+      });
+      if (!response.ok) throw new Error("security unlock failed");
+      setPassphrase("");
+      setSecurityMessage("工作区已解锁");
+      await refreshSecurityAfterChange();
+    } catch {
+      setSecurityMessage("口令错误或工作区不可用");
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     void submitQuery(input);
@@ -831,6 +938,67 @@ export default function App() {
 
       <section className="workbench">
         <aside className="system-panel">
+          <div className="panel-block">
+            <div className="panel-title">
+              <span>
+                <ShieldCheck size={15} />
+                工作区解锁
+              </span>
+            </div>
+            {!securityStatus?.crypto_initialized ? (
+              <div className="security-form">
+                <p>该口令用于保护本地工作区主密钥。SoulDrive 不会保存口令，也不提供找回能力。忘记口令后，该 U 盘中的加密知识库将无法解锁。</p>
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={(event) => setPassphrase(event.target.value)}
+                  placeholder="设置工作区口令"
+                  disabled={securityBusy}
+                />
+                <input
+                  type="password"
+                  value={confirmPassphrase}
+                  onChange={(event) => setConfirmPassphrase(event.target.value)}
+                  placeholder="再次输入口令"
+                  disabled={securityBusy}
+                />
+                <label className="security-check">
+                  <input
+                    type="checkbox"
+                    checked={acknowledgeNoRecovery}
+                    onChange={(event) => setAcknowledgeNoRecovery(event.target.checked)}
+                    disabled={securityBusy}
+                  />
+                  <span>我已知晓忘记口令不可恢复</span>
+                </label>
+                <button type="button" disabled={securityBusy} onClick={() => void setupWorkspaceSecurity()}>
+                  初始化并解锁
+                </button>
+              </div>
+            ) : securityStatus.software_unlocked ? (
+              <div className="diagnostic-summary ok">
+                <div>
+                  <strong>UNLOCKED</strong>
+                  <span>工作区已通过口令解锁</span>
+                </div>
+              </div>
+            ) : (
+              <div className="security-form">
+                <input
+                  type="password"
+                  value={passphrase}
+                  onChange={(event) => setPassphrase(event.target.value)}
+                  placeholder="输入工作区口令"
+                  disabled={securityBusy}
+                />
+                <button type="button" disabled={securityBusy || !passphrase} onClick={() => void unlockWorkspaceSecurity()}>
+                  解锁工作区
+                </button>
+              </div>
+            )}
+            {securityMessage && <p className="security-message">{securityMessage}</p>}
+          </div>
+
           <div className="panel-block paper-library-block">
             <div className="panel-title">
               <span>
