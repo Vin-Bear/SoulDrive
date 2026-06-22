@@ -71,6 +71,10 @@ class SoulDriveWorkspace:
     def manifest_path(self):
         return str(Path(self.config_path) / WORKSPACE_MANIFEST)
 
+    @property
+    def keystore_path(self):
+        return str(Path(self.config_path) / "keystore.json")
+
     def ensure(self):
         for path in (
             self.papers_path,
