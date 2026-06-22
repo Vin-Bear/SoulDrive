@@ -29,9 +29,24 @@ from core.enterprise_security import (
 from core.observability import runtime_metrics
 from core.paper_importer import import_paper_into_workspace
 from core.paths import app_root
-from core.runtime_state import get_runtime_state, lock_runtime, unlock_runtime, update_indexing_status
+from core.runtime_state import (
+    get_runtime_state,
+    lock_runtime,
+    mark_software_locked,
+    mark_software_unlocked,
+    unlock_runtime,
+    update_indexing_status,
+)
 from core.tool_registry import build_default_tool_registry
 from core.workspace import SoulDriveWorkspace, is_souldrive_workspace, resolve_workspace
+from core.workspace_crypto import (
+    IncorrectPassphraseError,
+    KeystoreAlreadyInitializedError,
+    KeystoreNotInitializedError,
+    initialize_keystore,
+    is_keystore_initialized,
+    unlock_keystore,
+)
 from core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -279,6 +294,13 @@ class RuntimeRequest(BaseModel):
 class PaperImportRequest(BaseModel):
     source_paths: list[str] = Field(min_length=1, max_length=100)
 
+class SecurityInitRequest(BaseModel):
+    passphrase: str = Field(min_length=8, max_length=256)
+    acknowledge_no_recovery: bool = False
+
+class SecurityUnlockRequest(BaseModel):
+    passphrase: str = Field(min_length=1, max_length=256)
+
 class ToolCallRequest(BaseModel):
     name: str = Field(max_length=128)
     arguments: dict = Field(default_factory=dict)
@@ -362,6 +384,55 @@ async def ready():
 @app.get("/runtime/status")
 async def runtime_status():
     return public_runtime_state()
+
+@app.get("/security/status")
+async def security_status():
+    workspace = current_workspace()
+    state = get_runtime_state()
+    return {
+        "crypto_initialized": is_keystore_initialized(workspace),
+        "software_unlocked": bool(state.get("software_unlocked")),
+        "hardware_mounted": bool(state.get("hardware_mounted") or state.get("workspace_path")),
+        "reason": state.get("security_reason") or state.get("reason"),
+        "no_recovery": True,
+    }
+
+@app.post("/security/init")
+async def security_init(request: SecurityInitRequest):
+    if not request.acknowledge_no_recovery:
+        return JSONResponse({"error": "no recovery acknowledgement required"}, status_code=400)
+
+    workspace = current_workspace()
+    try:
+        initialize_keystore(workspace, request.passphrase)
+        unlock_keystore(workspace, request.passphrase)
+    except KeystoreAlreadyInitializedError:
+        return JSONResponse({"error": "workspace keystore already initialized"}, status_code=409)
+
+    current_audit_logger().append_event("security.keystore_initialized", {"no_recovery": True})
+    mark_software_unlocked()
+    return {"initialized": True, "software_unlocked": True, "state": public_runtime_state()}
+
+@app.post("/security/unlock")
+async def security_unlock(request: SecurityUnlockRequest):
+    workspace = current_workspace()
+    try:
+        unlock_keystore(workspace, request.passphrase)
+    except KeystoreNotInitializedError:
+        return JSONResponse({"error": "workspace keystore is not initialized"}, status_code=409)
+    except IncorrectPassphraseError:
+        current_audit_logger().append_event("security.unlock_failed", {"reason": "incorrect passphrase"})
+        return JSONResponse({"error": "incorrect passphrase"}, status_code=403)
+
+    mark_software_unlocked()
+    return {"software_unlocked": True, "state": public_runtime_state()}
+
+@app.post("/security/lock")
+async def security_lock():
+    _stop_indexer_worker()
+    cleanup_runtime()
+    mark_software_locked()
+    return {"software_unlocked": False, "state": public_runtime_state()}
 
 @app.get("/documents/list")
 async def documents_list():
