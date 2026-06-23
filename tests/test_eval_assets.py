@@ -11,13 +11,23 @@ from scripts import eval_rag
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DATASET_PATH = ROOT / "eval" / "enterprise_zh_v0.1.jsonl"
+DATASET_PATH = ROOT / "eval" / "enterprise_zh_v0.2.jsonl"
 SCRIPT_PATH = ROOT / "scripts" / "eval_rag.py"
 ALLOWED_SOURCE_HINTS = {
     "大模型知识管理系统",
     "大模型基准测试体系研究报告",
     "数据分类分级规则",
     "生成式人工智能服务安全基本要求",
+    "知识库问答场景中大语言模型私有化研究与应用实践",
+    "大模型私有部署与基础应用落地",
+    "城市+AI应用场景清单",
+    "综合交通运输大模型智能体创新应用典型案例",
+    "人工智能安全治理蓝皮书",
+    "数据要素发展报告",
+    "基于大模型和RAG的知识库问答系统",
+    "企业级RAG方案",
+    "MaxKB",
+    "LazyLLM",
 }
 
 
@@ -25,24 +35,37 @@ class EvalAssetsTests(unittest.TestCase):
     def test_enterprise_eval_dataset_has_readable_required_fields(self):
         records = _load_dataset()
 
-        self.assertGreaterEqual(len(records), 16)
+        self.assertGreaterEqual(len(records), 80)
         ids = {record["id"] for record in records}
         self.assertIn("KM-01", ids)
         self.assertIn("NEG-01", ids)
+        self.assertIn("LAZY-01", ids)
+        self.assertIn("XSEC-01", ids)
 
         for record in records:
             self.assertIsInstance(record["id"], str)
             self.assertIsInstance(record["question"], str)
             self.assertIsInstance(record["expected_sources"], list)
             self.assertIsInstance(record["rubric"], list)
+            self.assertIsInstance(record.get("expected_keywords", []), list)
+            self.assertIsInstance(record.get("should_refuse", False), bool)
+            self.assertIsInstance(record.get("requires_multi_doc", False), bool)
+            self.assertIsInstance(record.get("graph_relevant", False), bool)
             self.assertIn(record["type"], {"single_doc", "cross_doc", "negative", "safety"})
 
-    def test_enterprise_eval_dataset_only_targets_imported_four_documents(self):
+    def test_enterprise_eval_dataset_targets_enterprise_private_rag_documents(self):
         records = _load_dataset()
+        covered_sources = set()
 
         for record in records:
             for source in record["expected_sources"]:
                 self.assertIn(source, ALLOWED_SOURCE_HINTS)
+                covered_sources.add(source)
+
+        self.assertGreaterEqual(len(covered_sources), 10)
+        self.assertTrue(any(record.get("requires_multi_doc") for record in records))
+        self.assertTrue(any(record.get("graph_relevant") for record in records))
+        self.assertTrue(any(record.get("should_refuse") for record in records))
 
     def test_eval_script_prints_plain_chinese_metrics_from_fixture(self):
         fixture = [
@@ -52,6 +75,7 @@ class EvalAssetsTests(unittest.TestCase):
                 "expected_sources": ["数据安全法"],
                 "type": "single_doc",
                 "rubric": ["追溯", "安全保护义务"],
+                "expected_keywords": ["审计", "追溯"],
             },
             {
                 "id": "NEG-01",
@@ -59,6 +83,7 @@ class EvalAssetsTests(unittest.TestCase):
                 "expected_sources": [],
                 "type": "negative",
                 "rubric": ["应拒答"],
+                "should_refuse": True,
             },
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -112,9 +137,48 @@ class EvalAssetsTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertEqual(return_code, 0)
         self.assertIn("评测样本数: 2", output)
-        self.assertIn("检索命中率@3: 100.0%", output)
+        self.assertIn("检索全命中率@3: 100.0%", output)
+        self.assertIn("检索任一命中率@3: 100.0%", output)
+        self.assertIn("首条命中率@1: 100.0%", output)
+        self.assertIn("平均倒数排名(MRR): 1.000", output)
+        self.assertIn("平均来源覆盖率@3: 100.0%", output)
         self.assertIn("引用合法率: 100.0%", output)
         self.assertIn("拒答正确率: 100.0%", output)
+        self.assertIn("答案关键词覆盖率: 100.0%", output)
+
+    def test_source_matching_accepts_local_filename_aliases(self):
+        self.assertTrue(eval_rag.source_matches("“城市+AI”应用场景清单（第五批）.pdf", "城市+AI应用场景清单"))
+        self.assertTrue(eval_rag.source_matches("综合交通运输大模型智能体创新应用.pdf", "综合交通运输大模型智能体创新应用典型案例"))
+        self.assertTrue(eval_rag.source_matches("基于大模型和RAG的知识库问答系统.pdf", "MaxKB"))
+
+    def test_all_known_local_document_names_match_dataset_sources(self):
+        local_names = [
+            "LazyLLM企业级RAG方案-私有化部署与权限安全.pdf",
+            "基于大模型和RAG的知识库问答系统.pdf",
+            "数据要素发展报告.pdf",
+            "人工智能安全治理蓝皮书.pdf",
+            "综合交通运输大模型智能体创新应用.pdf",
+            "“城市+AI”应用场景清单（第五批）.pdf",
+            "大模型私有部署与基础应用落地.pdf",
+            "知识库问答场景中大语言模型私有化研究与应用实践.pdf",
+            "生成式人工智能服务安全基本要求.pdf",
+            "数据安全技术 数据分类分级规则.pdf",
+            "大模型基准测试体系研究报告.pdf",
+            "大模型知识管理系统.pdf",
+        ]
+        expected_sources = {
+            source
+            for record in _load_dataset()
+            for source in record["expected_sources"]
+        }
+
+        unmatched = [
+            source
+            for source in expected_sources
+            if not any(eval_rag.source_matches(name, source) for name in local_names)
+        ]
+
+        self.assertEqual(unmatched, [])
 
     def test_eval_script_reports_missing_passphrase_for_encrypted_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
