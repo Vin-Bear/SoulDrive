@@ -27,6 +27,25 @@ REFUSAL_MARKERS = (
     "不会生成可能误导",
     "无相关证据",
 )
+SOURCE_ALIASES = {
+    "大模型知识管理系统": ["大模型知识管理系统"],
+    "大模型基准测试体系研究报告": ["大模型基准测试体系研究报告"],
+    "数据分类分级规则": ["数据分类分级规则", "数据安全技术数据分类分级规则"],
+    "生成式人工智能服务安全基本要求": ["生成式人工智能服务安全基本要求"],
+    "知识库问答场景中大语言模型私有化研究与应用实践": ["知识库问答场景中大语言模型私有化研究与应用实践"],
+    "大模型私有部署与基础应用落地": ["大模型私有部署与基础应用落地"],
+    "城市+AI应用场景清单": ["城市+AI应用场景清单", "城市AI应用场景清单"],
+    "综合交通运输大模型智能体创新应用典型案例": [
+        "综合交通运输大模型智能体创新应用典型案例",
+        "综合交通运输大模型智能体创新应用",
+    ],
+    "人工智能安全治理蓝皮书": ["人工智能安全治理蓝皮书"],
+    "数据要素发展报告": ["数据要素发展报告"],
+    "基于大模型和RAG的知识库问答系统": ["基于大模型和RAG的知识库问答系统", "MaxKB"],
+    "企业级RAG方案": ["企业级RAG方案", "LazyLLM企业级RAG方案", "LazyLLM"],
+    "MaxKB": ["MaxKB", "基于大模型和RAG的知识库问答系统"],
+    "LazyLLM": ["LazyLLM", "LazyLLM企业级RAG方案", "企业级RAG方案"],
+}
 
 
 @dataclass(frozen=True)
@@ -36,6 +55,10 @@ class EvalRecord:
     expected_sources: list[str]
     type: str
     rubric: list[str]
+    expected_keywords: list[str]
+    should_refuse: bool
+    requires_multi_doc: bool
+    graph_relevant: bool
 
 
 @dataclass(frozen=True)
@@ -50,7 +73,7 @@ class EvalResult:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate SoulDrive retrieval and citation quality.")
-    parser.add_argument("--dataset", default="eval/enterprise_zh_v0.1.jsonl", help="JSONL evaluation dataset path.")
+    parser.add_argument("--dataset", default="eval/enterprise_zh_v0.2.jsonl", help="JSONL evaluation dataset path.")
     parser.add_argument("--workspace", default=None, help="SoulDrive workspace root. Defaults to current runtime workspace.")
     parser.add_argument("--top-k", type=int, default=3, help="Evidence count to retrieve.")
     parser.add_argument("--from-results", default=None, help="Read prior JSONL results instead of running retrieval.")
@@ -103,6 +126,10 @@ def load_dataset(path: Path) -> list[EvalRecord]:
                 expected_sources=[str(item) for item in payload.get("expected_sources", [])],
                 type=str(payload["type"]),
                 rubric=[str(item) for item in payload.get("rubric", [])],
+                expected_keywords=[str(item) for item in payload.get("expected_keywords", [])],
+                should_refuse=bool(payload.get("should_refuse", False)),
+                requires_multi_doc=bool(payload.get("requires_multi_doc", False)),
+                graph_relevant=bool(payload.get("graph_relevant", False)),
             )
         )
     return records
@@ -262,20 +289,38 @@ def summarize(records: list[EvalRecord], results: list[EvalResult], top_k: int) 
         rows.append(score_record(record, result, top_k=top_k))
 
     positive_rows = [row for row in rows if row["expected_sources"]]
-    negative_rows = [row for row in rows if not row["expected_sources"]]
     answer_rows = [row for row in rows if row["has_answer"]]
-    answer_negative_rows = [row for row in negative_rows if row["has_answer"]]
+    refusal_rows = [row for row in rows if row["should_refuse"] and row["has_answer"]]
+    keyword_rows = [row for row in rows if row["keyword_sample"]]
+    multi_doc_rows = [row for row in rows if row["requires_multi_doc"]]
+    graph_rows = [row for row in rows if row["graph_relevant"]]
     latencies = [row["elapsed_ms"] for row in rows if row["elapsed_ms"] is not None]
 
     return {
         "sample_count": len(rows),
         "top_k": top_k,
-        "retrieval_hit_rate": _ratio(sum(row["source_hit"] for row in positive_rows), len(positive_rows)),
-        "citation_valid_rate": _ratio(sum(row["citation_valid"] for row in answer_rows), len(answer_rows)),
-        "refusal_accuracy": _ratio(
-            sum(row["refusal_correct"] for row in answer_negative_rows),
-            len(answer_negative_rows),
+        "retrieval_all_hit_rate": _ratio(sum(row["source_all_hit"] for row in positive_rows), len(positive_rows)),
+        "retrieval_any_hit_rate": _ratio(sum(row["source_any_hit"] for row in positive_rows), len(positive_rows)),
+        "first_hit_rate": _ratio(sum(row["first_hit"] for row in positive_rows), len(positive_rows)),
+        "mean_reciprocal_rank": _ratio(
+            sum(row["reciprocal_rank"] for row in positive_rows),
+            len(positive_rows),
         ),
+        "average_source_coverage": _ratio(
+            sum(row["source_coverage"] for row in positive_rows),
+            len(positive_rows),
+        ),
+        "multi_doc_all_hit_rate": _ratio(
+            sum(row["source_all_hit"] for row in multi_doc_rows),
+            len(multi_doc_rows),
+        ),
+        "graph_context_hit_rate": _ratio(
+            sum(row["source_any_hit"] for row in graph_rows),
+            len(graph_rows),
+        ),
+        "citation_valid_rate": _ratio(sum(row["citation_valid"] for row in answer_rows), len(answer_rows)),
+        "refusal_accuracy": _ratio(sum(row["refusal_correct"] for row in refusal_rows), len(refusal_rows)),
+        "answer_keyword_coverage": _ratio(sum(row["keyword_coverage"] for row in keyword_rows), len(keyword_rows)),
         "avg_latency_ms": int(sum(latencies) / len(latencies)) if latencies else None,
         "rows": rows,
     }
@@ -285,29 +330,82 @@ def score_record(record: EvalRecord, result: EvalResult, top_k: int) -> dict[str
     evidence = result.evidence[:top_k]
     answer = result.answer or ""
     expected_sources = record.expected_sources
-    source_hit = bool(expected_sources) and all(
+    source_hits = [
         any(source_matches(item.get("source_filename"), expected) for item in evidence)
         for expected in expected_sources
+    ]
+    first_evidence = evidence[0] if evidence else {}
+    first_hit = bool(expected_sources) and any(
+        source_matches(first_evidence.get("source_filename"), expected)
+        for expected in expected_sources
     )
+    first_match_rank = first_matching_rank(evidence, expected_sources)
+    source_coverage = (sum(source_hits) / len(expected_sources)) if expected_sources else 0.0
     citation_valid = citations_are_valid(answer, evidence)
-    refusal_correct = (not expected_sources) and answer_refuses(answer)
+    refusal_correct = record.should_refuse and answer_refuses(answer)
+    keyword_coverage = keyword_coverage_ratio(answer, record.expected_keywords)
     return {
         "id": record.id,
         "question": record.question,
         "expected_sources": expected_sources,
         "top_sources": [str(item.get("source_filename") or "未知来源") for item in evidence],
         "has_answer": bool(answer.strip()),
-        "source_hit": source_hit,
+        "source_all_hit": bool(expected_sources) and all(source_hits),
+        "source_any_hit": bool(expected_sources) and any(source_hits),
+        "first_hit": first_hit,
+        "first_match_rank": first_match_rank,
+        "reciprocal_rank": (1.0 / first_match_rank) if first_match_rank else 0.0,
+        "source_coverage": source_coverage,
         "citation_valid": citation_valid,
         "refusal_correct": refusal_correct,
+        "should_refuse": record.should_refuse,
+        "requires_multi_doc": record.requires_multi_doc,
+        "graph_relevant": record.graph_relevant,
+        "keyword_sample": bool(answer.strip() and record.expected_keywords and not record.should_refuse),
+        "keyword_coverage": keyword_coverage,
         "elapsed_ms": result.elapsed_ms,
     }
 
 
 def source_matches(source_filename: Any, expected: str) -> bool:
-    source = str(source_filename or "").lower()
-    normalized_expected = expected.lower()
-    return normalized_expected in source
+    source = normalize_source_name(str(source_filename or ""))
+    for alias in source_aliases(expected):
+        normalized_alias = normalize_source_name(alias)
+        if normalized_alias and normalized_alias in source:
+            return True
+    return False
+
+
+def source_aliases(expected: str) -> list[str]:
+    aliases = SOURCE_ALIASES.get(expected, [])
+    return [expected, *aliases]
+
+
+def normalize_source_name(value: str) -> str:
+    lowered = value.lower()
+    for suffix in (".pdf", ".docx", ".md", ".html", ".txt"):
+        if lowered.endswith(suffix):
+            lowered = lowered[: -len(suffix)]
+            break
+    return re.sub(r"[\s_\-—–·,，。\.《》<>“”\"'‘’()（）【】\[\]：:；;]+", "", lowered)
+
+
+def first_matching_rank(evidence: list[dict[str, Any]], expected_sources: list[str]) -> int | None:
+    if not expected_sources:
+        return None
+    for rank, item in enumerate(evidence, start=1):
+        if any(source_matches(item.get("source_filename"), expected) for expected in expected_sources):
+            return rank
+    return None
+
+
+def keyword_coverage_ratio(answer: str, expected_keywords: list[str]) -> float:
+    keywords = [keyword for keyword in expected_keywords if keyword]
+    if not answer.strip() or not keywords:
+        return 0.0
+    normalized_answer = answer.lower()
+    hits = sum(1 for keyword in keywords if keyword.lower() in normalized_answer)
+    return hits / len(keywords)
 
 
 def citations_are_valid(answer: str, evidence: list[dict[str, Any]]) -> bool:
@@ -326,13 +424,20 @@ def answer_refuses(answer: str) -> bool:
 
 def print_report(report: dict[str, Any]):
     print(f"评测样本数: {report['sample_count']}")
-    print(f"检索命中率@{report['top_k']}: {_percent(report['retrieval_hit_rate'])}")
+    print(f"检索全命中率@{report['top_k']}: {_percent(report['retrieval_all_hit_rate'])}")
+    print(f"检索任一命中率@{report['top_k']}: {_percent(report['retrieval_any_hit_rate'])}")
+    print(f"首条命中率@1: {_percent(report['first_hit_rate'])}")
+    print(f"平均倒数排名(MRR): {_decimal(report['mean_reciprocal_rank'])}")
+    print(f"平均来源覆盖率@{report['top_k']}: {_percent(report['average_source_coverage'])}")
+    print(f"跨文档全命中率@{report['top_k']}: {_percent(report['multi_doc_all_hit_rate'])}")
+    print(f"图谱相关题命中率@{report['top_k']}: {_percent(report['graph_context_hit_rate'])}")
     print(f"引用合法率: {_percent(report['citation_valid_rate'])}")
     print(f"拒答正确率: {_percent(report['refusal_accuracy'])}")
+    print(f"答案关键词覆盖率: {_percent(report['answer_keyword_coverage'])}")
     if report["avg_latency_ms"] is not None:
         print(f"平均检索耗时: {report['avg_latency_ms']} ms")
 
-    misses = [row for row in report["rows"] if row["expected_sources"] and not row["source_hit"]]
+    misses = [row for row in report["rows"] if row["expected_sources"] and not row["source_all_hit"]]
     if misses:
         print("\n未命中样本:")
         for row in misses[:10]:
@@ -345,6 +450,12 @@ def _percent(value: float | None) -> str:
     if value is None:
         return "无样本"
     return f"{value * 100:.1f}%"
+
+
+def _decimal(value: float | None) -> str:
+    if value is None:
+        return "无样本"
+    return f"{value:.3f}"
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
