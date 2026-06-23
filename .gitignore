@@ -24,6 +24,7 @@ souldrive-ui/src-tauri/sidecars/souldrive-sidecar.exe
 runtime/
 souldrive_db/
 data/
+eval/runs/
 index/
 audit/
 config/workspace.json

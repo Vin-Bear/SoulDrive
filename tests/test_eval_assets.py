@@ -146,6 +146,223 @@ class EvalAssetsTests(unittest.TestCase):
         self.assertIn("拒答正确率: 100.0%", output)
         self.assertIn("答案关键词覆盖率: 100.0%", output)
 
+    def test_eval_script_can_run_optional_answer_generation_with_model_override(self):
+        fixture = [
+            {
+                "id": "ANS-01",
+                "question": "企业知识库为什么需要审计日志？",
+                "expected_sources": ["数据安全法"],
+                "type": "single_doc",
+                "rubric": ["追溯"],
+                "expected_keywords": ["审计", "追溯"],
+            }
+        ]
+        captured = {}
+
+        def fake_run_answer_generation(records, workspace, top_k):
+            captured["workspace"] = workspace
+            captured["top_k"] = top_k
+            captured["chat_model"] = os.environ.get("SOULDRIVE_CHAT_MODEL")
+            return [
+                eval_rag.EvalResult(
+                    id=records[0].id,
+                    question=records[0].question,
+                    expected_sources=records[0].expected_sources,
+                    answer="企业知识库需要审计日志来支持审计和追溯 [E1]。",
+                    evidence=[
+                        {
+                            "id": "E1",
+                            "source_filename": "数据安全法.pdf",
+                            "score": 0.2,
+                        }
+                    ],
+                    elapsed_ms=1200,
+                    retrieval_ms=200,
+                    generation_ms=1000,
+                    model_name=os.environ.get("SOULDRIVE_CHAT_MODEL"),
+                )
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_path = Path(temp_dir) / "fixture.jsonl"
+            dataset_path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in fixture),
+                encoding="utf-8",
+            )
+            result_path = Path(temp_dir) / "answer_results.jsonl"
+
+            stdout = io.StringIO()
+            with patch.object(eval_rag, "resolve_workspace_arg", return_value=str(Path(temp_dir) / "SoulDrive")), patch.object(
+                eval_rag, "prepare_workspace_keys", return_value=True
+            ), patch.object(eval_rag, "workspace_requires_key", return_value=False), patch.object(
+                eval_rag, "run_answer_generation", side_effect=fake_run_answer_generation
+            ), redirect_stdout(stdout):
+                return_code = eval_rag.main(
+                    [
+                        "--dataset",
+                        str(dataset_path),
+                        "--workspace",
+                        str(Path(temp_dir) / "SoulDrive"),
+                        "--include-answers",
+                        "--chat-model",
+                        "qwen-test.gguf",
+                        "--save-results",
+                        str(result_path),
+                    ]
+                )
+            saved = json.loads(result_path.read_text(encoding="utf-8").splitlines()[0])
+
+        output = stdout.getvalue()
+        self.assertEqual(return_code, 0)
+        self.assertEqual(captured["chat_model"], "qwen-test.gguf")
+        self.assertEqual(captured["top_k"], 3)
+        self.assertIn("评测模式: 答案生成评测", output)
+        self.assertIn("生成模型: qwen-test.gguf", output)
+        self.assertIn("综合可靠率: 100.0%", output)
+        self.assertEqual(saved["model_name"], "qwen-test.gguf")
+        self.assertEqual(saved["generation_ms"], 1000)
+
+    def test_answer_quality_summary_marks_reliable_refusal_and_leakage(self):
+        records = [
+            eval_rag.EvalRecord(
+                id="GOOD-01",
+                question="企业知识库为什么需要审计日志？",
+                expected_sources=["数据安全法"],
+                type="single_doc",
+                rubric=["追溯"],
+                expected_keywords=["审计", "追溯"],
+                should_refuse=False,
+                requires_multi_doc=False,
+                graph_relevant=False,
+            ),
+            eval_rag.EvalRecord(
+                id="NEG-OK",
+                question="SoulDrive 创始人是谁？",
+                expected_sources=[],
+                type="negative",
+                rubric=["应拒答"],
+                expected_keywords=[],
+                should_refuse=True,
+                requires_multi_doc=False,
+                graph_relevant=False,
+            ),
+            eval_rag.EvalRecord(
+                id="NEG-BAD",
+                question="SoulDrive 是否已经中标某银行项目？",
+                expected_sources=[],
+                type="negative",
+                rubric=["应拒答"],
+                expected_keywords=[],
+                should_refuse=True,
+                requires_multi_doc=False,
+                graph_relevant=False,
+            ),
+        ]
+        results = [
+            eval_rag.EvalResult(
+                id="GOOD-01",
+                question=records[0].question,
+                expected_sources=records[0].expected_sources,
+                answer="企业知识库需要审计日志来支持审计和追溯 [E1]。",
+                evidence=[{"id": "E1", "source_filename": "数据安全法.pdf"}],
+                elapsed_ms=1000,
+            ),
+            eval_rag.EvalResult(
+                id="NEG-OK",
+                question=records[1].question,
+                expected_sources=[],
+                answer="未找到足够可靠的相关证据，因此不能回答。",
+                evidence=[],
+                elapsed_ms=900,
+            ),
+            eval_rag.EvalResult(
+                id="NEG-BAD",
+                question=records[2].question,
+                expected_sources=[],
+                answer="SoulDrive 已经中标某银行项目。",
+                evidence=[],
+                elapsed_ms=800,
+            ),
+        ]
+
+        report = eval_rag.summarize(records, results, top_k=3)
+
+        self.assertEqual(report["answer_sample_count"], 3)
+        self.assertEqual(report["answerable_pass_rate"], 1.0)
+        self.assertEqual(report["refusal_leak_rate"], 0.5)
+        self.assertEqual(report["overall_reliability_rate"], 2 / 3)
+        self.assertEqual(report["invalid_citation_rate"], 1 / 3)
+
+    def test_eval_script_prints_comparison_report_from_saved_answer_results(self):
+        fixture = [
+            {
+                "id": "ANS-01",
+                "question": "企业知识库为什么需要审计日志？",
+                "expected_sources": ["数据安全法"],
+                "type": "single_doc",
+                "rubric": ["追溯"],
+                "expected_keywords": ["审计", "追溯"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_path = Path(temp_dir) / "fixture.jsonl"
+            dataset_path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in fixture),
+                encoding="utf-8",
+            )
+            baseline_path = Path(temp_dir) / "3b.jsonl"
+            candidate_path = Path(temp_dir) / "7b.jsonl"
+            baseline_path.write_text(
+                json.dumps(
+                    {
+                        "id": "ANS-01",
+                        "answer": "企业知识库需要审计日志 [E1]。",
+                        "evidence": [{"id": "E1", "source_filename": "数据安全法.pdf"}],
+                        "elapsed_ms": 900,
+                        "model_name": "3b",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            candidate_path.write_text(
+                json.dumps(
+                    {
+                        "id": "ANS-01",
+                        "answer": "企业知识库需要审计日志来支持审计和追溯 [E1]。",
+                        "evidence": [{"id": "E1", "source_filename": "数据安全法.pdf"}],
+                        "elapsed_ms": 1200,
+                        "model_name": "7b",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                return_code = eval_rag.main(
+                    [
+                        "--dataset",
+                        str(dataset_path),
+                        "--compare-results",
+                        str(baseline_path),
+                        str(candidate_path),
+                        "--baseline-label",
+                        "3B",
+                        "--candidate-label",
+                        "7B",
+                    ]
+                )
+
+        output = stdout.getvalue()
+        self.assertEqual(return_code, 0)
+        self.assertIn("对比报告: 3B -> 7B", output)
+        self.assertIn("答案关键词覆盖率", output)
+        self.assertIn("+50.0百分点", output)
+
     def test_source_matching_accepts_local_filename_aliases(self):
         self.assertTrue(eval_rag.source_matches("“城市+AI”应用场景清单（第五批）.pdf", "城市+AI应用场景清单"))
         self.assertTrue(eval_rag.source_matches("综合交通运输大模型智能体创新应用.pdf", "综合交通运输大模型智能体创新应用典型案例"))

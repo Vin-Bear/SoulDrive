@@ -58,16 +58,59 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertEqual(config.graph_n_ctx, 8192)
         self.assertEqual(config.max_tokens, 900)
 
-    def test_preferred_chat_model_keeps_standard_3b_default_when_7b_is_available(self):
+    def test_preferred_chat_model_prefers_complete_7b_shard_for_experiment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             model_dir = Path(temp_dir)
             (model_dir / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
-            (model_dir / "qwen2.5-7b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf").write_text("model", encoding="utf-8")
+
+            with patch.dict(os.environ, {"SOULDRIVE_MODEL_DIR": str(model_dir)}):
+                model_filename = preferred_chat_model_filename()
+
+        self.assertEqual(model_filename, "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf")
+
+    def test_preferred_chat_model_ignores_incomplete_7b_shard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            (model_dir / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf").write_text("model", encoding="utf-8")
 
             with patch.dict(os.environ, {"SOULDRIVE_MODEL_DIR": str(model_dir)}):
                 model_filename = preferred_chat_model_filename()
 
         self.assertEqual(model_filename, "qwen2.5-3b-instruct-q4_k_m.gguf")
+
+    def test_configured_chat_model_can_force_3b_when_7b_shard_is_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            (model_dir / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf").write_text("model", encoding="utf-8")
+
+            with patch.dict(os.environ, {
+                "SOULDRIVE_MODEL_DIR": str(model_dir),
+                "SOULDRIVE_CHAT_MODEL": "qwen2.5-3b-instruct-q4_k_m.gguf",
+            }):
+                model_filename = preferred_chat_model_filename()
+
+        self.assertEqual(model_filename, "qwen2.5-3b-instruct-q4_k_m.gguf")
+
+    def test_preferred_chat_model_prioritizes_7b_across_search_roots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configured_model_dir = root / "app_models"
+            workspace_model_dir = root / "workspace" / "models"
+            configured_model_dir.mkdir(parents=True)
+            workspace_model_dir.mkdir(parents=True)
+            (configured_model_dir / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (workspace_model_dir / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf").write_text("model", encoding="utf-8")
+            (workspace_model_dir / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf").write_text("model", encoding="utf-8")
+
+            with patch.dict(os.environ, {"SOULDRIVE_MODEL_DIR": str(configured_model_dir)}):
+                model_filename = preferred_chat_model_filename(str(root / "workspace"))
+
+        self.assertEqual(model_filename, "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf")
 
     def test_preferred_chat_model_falls_back_to_3b(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -123,6 +166,23 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertFalse(report["ready"])
         self.assertIn("config", report)
         self.assertFalse(report["chat_model"]["ready"])
+
+    def test_model_runtime_diagnostics_requires_all_configured_7b_shards(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            first_shard = "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+            second_shard = "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+            (model_dir / first_shard).write_text("model", encoding="utf-8")
+
+            with patch.dict(os.environ, {
+                "SOULDRIVE_MODEL_DIR": str(model_dir),
+                "SOULDRIVE_CHAT_MODEL": first_shard,
+            }):
+                report = model_runtime_diagnostics()
+
+        self.assertFalse(report["chat_model"]["ready"])
+        self.assertEqual(report["chat_model"]["selected"], first_shard)
+        self.assertEqual(report["chat_model"]["missing_parts"], [second_shard])
 
     def test_load_llama_with_gpu_fallback_smoke_tests_generation(self):
         class FakeLlama:
