@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import core.runtime_state as runtime_state
-from core.diagnostics import product_diagnostics
+from core.diagnostics import model_diagnostics, product_diagnostics
 from core.license import LicenseStatus
 from core.workspace import SoulDriveWorkspace
 
@@ -84,6 +84,24 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["workspace"]["reason"], "waiting for removable SoulDrive workspace")
         self.assertFalse(report["ready"])
 
+    def test_model_diagnostics_accepts_complete_7b_runtime_without_3b(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            _create_workspace_embedding_models(workspace)
+            models_path = Path(workspace.models_path)
+            (models_path / "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf").write_text("model", encoding="utf-8")
+            (models_path / "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf").write_text("model", encoding="utf-8")
+
+            with patch("core.diagnostics.model_search_dirs", return_value=[models_path]):
+                report = model_diagnostics(workspace.root_path)
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(
+            report["runtime"]["chat_model"]["selected"],
+            "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+        )
+        self.assertNotIn("qwen2.5-3b-instruct-q4_k_m.gguf", report["missing"])
+
 
 def _create_minimal_project_root(root: Path):
     (root / "models" / "bge-small-zh-v1.5" / "1_Pooling").mkdir(parents=True)
@@ -106,6 +124,13 @@ def _create_minimal_project_root(root: Path):
 
 def _create_workspace_with_models(drive_root: Path):
     workspace = SoulDriveWorkspace.from_drive(str(drive_root)).ensure()
+    _create_workspace_embedding_models(workspace)
+    (Path(workspace.models_path) / "mmarco-mMiniLMv2-L6-H384-v1").mkdir(parents=True)
+    (Path(workspace.models_path) / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+    return workspace
+
+
+def _create_workspace_embedding_models(workspace: SoulDriveWorkspace):
     for relative_path in (
         "bge-small-zh-v1.5/config.json",
         "bge-small-zh-v1.5/model.safetensors",
@@ -116,9 +141,6 @@ def _create_workspace_with_models(drive_root: Path):
         target = Path(workspace.models_path) / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}", encoding="utf-8")
-    (Path(workspace.models_path) / "mmarco-mMiniLMv2-L6-H384-v1").mkdir(parents=True)
-    (Path(workspace.models_path) / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
-    return workspace
 
 
 if __name__ == "__main__":

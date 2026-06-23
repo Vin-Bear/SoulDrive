@@ -12,9 +12,18 @@ from core.reranker import reranker_runtime_diagnostics
 
 
 DEFAULT_CHAT_MODEL = "qwen2.5-3b-instruct-q4_k_m.gguf"
+EXPERIMENT_7B_CHAT_MODEL = "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+EXPERIMENT_7B_CHAT_MODEL_PARTS = (
+    "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+    "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+)
+CHAT_MODEL_REQUIRED_FILES = {
+    EXPERIMENT_7B_CHAT_MODEL: EXPERIMENT_7B_CHAT_MODEL_PARTS,
+}
 PREFERRED_CHAT_MODELS = (
-    DEFAULT_CHAT_MODEL,
+    EXPERIMENT_7B_CHAT_MODEL,
     "qwen2.5-7b-instruct-q4_k_m.gguf",
+    DEFAULT_CHAT_MODEL,
 )
 DEFAULT_EMBEDDING_MODEL = "bge-small-zh-v1.5"
 
@@ -105,9 +114,10 @@ def preferred_chat_model_filename(workspace_path: str | None = None) -> str:
     configured = os.environ.get("SOULDRIVE_CHAT_MODEL")
     if configured:
         return configured
-    for directory in model_search_dirs(workspace_path):
-        for model_filename in PREFERRED_CHAT_MODELS:
-            if (directory / model_filename).exists():
+    search_dirs = model_search_dirs(workspace_path)
+    for model_filename in PREFERRED_CHAT_MODELS:
+        for directory in search_dirs:
+            if _chat_model_candidate_ready(directory, model_filename):
                 return model_filename
     return PREFERRED_CHAT_MODELS[0]
 
@@ -218,11 +228,12 @@ def model_runtime_diagnostics(workspace_path: str | None = None) -> dict[str, An
     embedding_path = Path(resolve_model_path(DEFAULT_EMBEDDING_MODEL, workspace_path))
     search_roots = model_search_dirs(workspace_path)
     reranker_report = reranker_runtime_diagnostics(workspace_path)
+    chat_model_status = _chat_model_status(chat_path, config.model_filename)
     return {
-        "ready": chat_path.exists() and embedding_path.exists(),
+        "ready": chat_model_status["ready"] and embedding_path.exists(),
         "config": config.public_dict(),
         "chat_model": {
-            **_path_status(chat_path),
+            **chat_model_status,
             "selected": config.model_filename,
         },
         "embedding_model": _path_status(embedding_path),
@@ -257,6 +268,27 @@ def _path_status(path: Path) -> dict[str, Any]:
         "name": path.name,
         "size": size,
     }
+
+
+def _chat_model_candidate_ready(directory: Path, model_filename: str) -> bool:
+    return all((directory / required_file).exists() for required_file in _required_chat_model_files(model_filename))
+
+
+def _required_chat_model_files(model_filename: str) -> tuple[str, ...]:
+    return CHAT_MODEL_REQUIRED_FILES.get(model_filename, (model_filename,))
+
+
+def _chat_model_status(path: Path, model_filename: str) -> dict[str, Any]:
+    status = _path_status(path)
+    missing_parts = [
+        required_file
+        for required_file in _required_chat_model_files(model_filename)
+        if not (path.parent / required_file).exists()
+    ]
+    if missing_parts:
+        status["ready"] = False
+        status["missing_parts"] = missing_parts
+    return status
 
 
 def _redact_path(path: Path) -> str:

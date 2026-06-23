@@ -11,7 +11,6 @@ from core.workspace import SoulDriveWorkspace, resolve_workspace
 
 
 REQUIRED_MODEL_FILES = (
-    "qwen2.5-3b-instruct-q4_k_m.gguf",
     "bge-small-zh-v1.5/config.json",
     "bge-small-zh-v1.5/model.safetensors",
     "bge-small-zh-v1.5/tokenizer.json",
@@ -94,7 +93,7 @@ def model_diagnostics(workspace_path: str | None = None) -> dict[str, Any]:
             })
     runtime_report = model_runtime_diagnostics(workspace_path)
     return {
-        "ready": not missing,
+        "ready": not missing and runtime_report["ready"],
         "missing": missing,
         "resolved": resolved,
         "search_roots": [_redact_path(path) for path in dirs],
