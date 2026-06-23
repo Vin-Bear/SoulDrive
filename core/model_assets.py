@@ -3,6 +3,7 @@ from pathlib import Path
 
 from core.model_runtime import DEFAULT_CHAT_MODEL, DEFAULT_EMBEDDING_MODEL
 from core.paths import model_search_dirs
+from core.reranker import PREFERRED_RERANKER_MODELS
 from core.workspace import SoulDriveWorkspace
 
 
@@ -43,7 +44,35 @@ def sync_workspace_models(workspace: SoulDriveWorkspace) -> list[dict]:
             copied_files = 1
         results.append({"name": asset_name, "status": "copied", "files_copied": copied_files})
 
+    reranker_asset_name = _first_available_asset(PREFERRED_RERANKER_MODELS, workspace_root)
+    if reranker_asset_name is not None:
+        results.extend(_sync_single_asset(reranker_asset_name, destination_root, workspace_root))
+
     return results
+
+
+def _sync_single_asset(asset_name: str, destination_root: Path, workspace_root: Path) -> list[dict]:
+    destination = destination_root / asset_name
+    source = _find_model_asset_source(asset_name, workspace_root)
+    if source is None:
+        return [{"name": asset_name, "status": "missing_source"}]
+
+    if destination.exists():
+        copied_files = _copy_missing_files(source, destination) if source.is_dir() else 0
+        return [{
+            "name": asset_name,
+            "status": "updated" if copied_files else "already_present",
+            "files_copied": copied_files,
+        }]
+
+    if source.is_dir():
+        shutil.copytree(source, destination)
+        copied_files = sum(1 for item in destination.rglob("*") if item.is_file())
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied_files = 1
+    return [{"name": asset_name, "status": "copied", "files_copied": copied_files}]
 
 
 def _find_model_asset_source(asset_name: str, workspace_root: Path) -> Path | None:
@@ -75,6 +104,13 @@ def _copy_missing_files(source: Path, destination: Path) -> int:
         shutil.copy2(source_item, destination_item)
         copied_files += 1
     return copied_files
+
+
+def _first_available_asset(asset_names: tuple[str, ...], workspace_root: Path) -> str | None:
+    for asset_name in asset_names:
+        if _find_model_asset_source(asset_name, workspace_root) is not None:
+            return asset_name
+    return None
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -1,0 +1,348 @@
+import base64
+import json
+import math
+import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from core.keyword_index import KeywordSearchResult
+from core.retrieval import bm25_scores
+
+
+PARENT_AAD = b"SoulDrive secure parent v1"
+CHILD_CONTENT_AAD = b"SoulDrive secure child content v1"
+CHILD_METADATA_AAD = b"SoulDrive secure child metadata v1"
+CHILD_EMBEDDING_AAD = b"SoulDrive secure child embedding v1"
+
+
+@dataclass(frozen=True)
+class _ChildRecord:
+    child_id: str
+    content: str
+    metadata: dict[str, Any]
+    embedding: list[float]
+
+
+class SecureVectorStore:
+    def __init__(self, db_path: str, keys):
+        self.db_path = db_path
+        self.keys = keys
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.collection = _SecureCollectionAdapter(self)
+        self._init_schema()
+
+    def _init_schema(self):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parent_documents (
+                parent_id TEXT PRIMARY KEY,
+                document_hash TEXT,
+                content_nonce TEXT NOT NULL,
+                content_ciphertext TEXT NOT NULL,
+                metadata_nonce TEXT NOT NULL,
+                metadata_ciphertext TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS child_chunks (
+                child_id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL,
+                document_hash TEXT,
+                content_nonce TEXT NOT NULL,
+                content_ciphertext TEXT NOT NULL,
+                metadata_nonce TEXT NOT NULL,
+                metadata_ciphertext TEXT NOT NULL,
+                embedding_nonce TEXT NOT NULL,
+                embedding_ciphertext TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.commit()
+
+    def upsert_parent(self, parent_id: str, content: str, metadata: dict[str, Any]):
+        document_hash = str(metadata.get("document_hash") or "")
+        content_nonce, content_ciphertext = self._encrypt_bytes(
+            self.keys.index_key,
+            content.encode("utf-8"),
+            PARENT_AAD + parent_id.encode("utf-8"),
+        )
+        metadata_nonce, metadata_ciphertext = self._encrypt_bytes(
+            self.keys.metadata_key,
+            json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+            PARENT_AAD + b":metadata:" + parent_id.encode("utf-8"),
+        )
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO parent_documents (
+                parent_id, document_hash, content_nonce, content_ciphertext, metadata_nonce, metadata_ciphertext
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parent_id,
+                document_hash,
+                content_nonce,
+                content_ciphertext,
+                metadata_nonce,
+                metadata_ciphertext,
+            ),
+        )
+        self.conn.commit()
+
+    def get_parent(self, parent_id: str):
+        row = self.conn.execute(
+            """
+            SELECT content_nonce, content_ciphertext, metadata_nonce, metadata_ciphertext
+            FROM parent_documents
+            WHERE parent_id = ?
+            """,
+            (parent_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "content": self._decrypt_text(
+                self.keys.index_key,
+                row[0],
+                row[1],
+                PARENT_AAD + parent_id.encode("utf-8"),
+            ),
+            "metadata": self._decrypt_json(
+                self.keys.metadata_key,
+                row[2],
+                row[3],
+                PARENT_AAD + b":metadata:" + parent_id.encode("utf-8"),
+            ),
+        }
+
+    def add_chunks(self, ids: list[str], documents: list[str], metadatas: list[dict[str, Any]], embeddings: list[list[float]]):
+        cursor = self.conn.cursor()
+        for child_id, content, metadata, embedding in zip(ids, documents, metadatas, embeddings):
+            parent_id = str(metadata.get("parent_id") or "")
+            document_hash = str(metadata.get("document_hash") or "")
+            content_nonce, content_ciphertext = self._encrypt_bytes(
+                self.keys.index_key,
+                content.encode("utf-8"),
+                CHILD_CONTENT_AAD + child_id.encode("utf-8"),
+            )
+            metadata_nonce, metadata_ciphertext = self._encrypt_bytes(
+                self.keys.metadata_key,
+                json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+                CHILD_METADATA_AAD + child_id.encode("utf-8"),
+            )
+            embedding_nonce, embedding_ciphertext = self._encrypt_bytes(
+                self.keys.index_key,
+                json.dumps(embedding).encode("utf-8"),
+                CHILD_EMBEDDING_AAD + child_id.encode("utf-8"),
+            )
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO child_chunks (
+                    child_id, parent_id, document_hash,
+                    content_nonce, content_ciphertext,
+                    metadata_nonce, metadata_ciphertext,
+                    embedding_nonce, embedding_ciphertext
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_id,
+                    parent_id,
+                    document_hash,
+                    content_nonce,
+                    content_ciphertext,
+                    metadata_nonce,
+                    metadata_ciphertext,
+                    embedding_nonce,
+                    embedding_ciphertext,
+                ),
+            )
+        self.conn.commit()
+
+    def query(self, query_embeddings: list[list[float]], n_results: int, include: list[str]):
+        if not query_embeddings:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+        query_embedding = query_embeddings[0]
+        ranked = sorted(
+            (
+                (
+                    self._cosine_similarity(query_embedding, record.embedding),
+                    record,
+                )
+                for record in self._all_child_records()
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )[:n_results]
+
+        ids = [record.child_id for _, record in ranked]
+        documents = [record.content for _, record in ranked] if "documents" in include else []
+        metadatas = [record.metadata for _, record in ranked] if "metadatas" in include else []
+        distances = [1.0 - score for score, _ in ranked] if "distances" in include else []
+        return {
+            "ids": [ids],
+            "documents": [documents],
+            "metadatas": [metadatas],
+            "distances": [distances],
+        }
+
+    def get(self, where: dict[str, Any] | None = None, include: list[str] | None = None, ids: list[str] | None = None):
+        include = include or []
+        records = self._all_child_records()
+        if ids is not None:
+            id_set = set(ids)
+            records = [record for record in records if record.child_id in id_set]
+        if where:
+            records = [record for record in records if self._matches_where(record.metadata, where)]
+
+        payload = {"ids": [record.child_id for record in records]}
+        if "documents" in include:
+            payload["documents"] = [record.content for record in records]
+        if "metadatas" in include:
+            payload["metadatas"] = [record.metadata for record in records]
+        return payload
+
+    def delete(self, ids: list[str]):
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(f"DELETE FROM child_chunks WHERE child_id IN ({placeholders})", tuple(ids))
+        self.conn.commit()
+
+    def keyword_search(self, query: str, limit: int = 12) -> list[KeywordSearchResult]:
+        records = self._all_child_records()
+        if not records:
+            return []
+        scores = bm25_scores(query, [record.content for record in records])
+        ranked = sorted(
+            zip(records, scores),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        results = []
+        for record, score in ranked:
+            if score <= 0:
+                continue
+            results.append(
+                KeywordSearchResult(
+                    doc_id=record.child_id,
+                    content=record.content,
+                    metadata=record.metadata,
+                    score=score,
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def delete_by_document_hash(self, document_hash: str):
+        self.conn.execute("DELETE FROM child_chunks WHERE document_hash = ?", (document_hash,))
+        self.conn.execute("DELETE FROM parent_documents WHERE document_hash = ?", (document_hash,))
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+    def _all_child_records(self) -> list[_ChildRecord]:
+        rows = self.conn.execute(
+            """
+            SELECT child_id, content_nonce, content_ciphertext, metadata_nonce, metadata_ciphertext, embedding_nonce, embedding_ciphertext
+            FROM child_chunks
+            ORDER BY child_id ASC
+            """
+        ).fetchall()
+        records = []
+        for row in rows:
+            child_id = row[0]
+            records.append(
+                _ChildRecord(
+                    child_id=child_id,
+                    content=self._decrypt_text(
+                        self.keys.index_key,
+                        row[1],
+                        row[2],
+                        CHILD_CONTENT_AAD + child_id.encode("utf-8"),
+                    ),
+                    metadata=self._decrypt_json(
+                        self.keys.metadata_key,
+                        row[3],
+                        row[4],
+                        CHILD_METADATA_AAD + child_id.encode("utf-8"),
+                    ),
+                    embedding=self._decrypt_json(
+                        self.keys.index_key,
+                        row[5],
+                        row[6],
+                        CHILD_EMBEDDING_AAD + child_id.encode("utf-8"),
+                    ),
+                )
+            )
+        return records
+
+    def _matches_where(self, metadata: dict[str, Any], where: dict[str, Any]) -> bool:
+        for key, value in where.items():
+            if metadata.get(key) != value:
+                return False
+        return True
+
+    def _encrypt_bytes(self, key: bytes, payload: bytes, aad: bytes) -> tuple[str, str]:
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(key).encrypt(nonce, payload, aad)
+        return _b64(nonce), _b64(ciphertext)
+
+    def _decrypt_text(self, key: bytes, nonce: str, ciphertext: str, aad: bytes) -> str:
+        return self._decrypt_bytes(key, nonce, ciphertext, aad).decode("utf-8")
+
+    def _decrypt_json(self, key: bytes, nonce: str, ciphertext: str, aad: bytes):
+        return json.loads(self._decrypt_bytes(key, nonce, ciphertext, aad).decode("utf-8"))
+
+    def _decrypt_bytes(self, key: bytes, nonce: str, ciphertext: str, aad: bytes) -> bytes:
+        try:
+            return AESGCM(key).decrypt(_unb64(nonce), _unb64(ciphertext), aad)
+        except InvalidTag as exc:
+            raise ValueError("secure vector store authentication failed") from exc
+
+    def _cosine_similarity(self, left: list[float], right: list[float]) -> float:
+        if not left or not right:
+            return 0.0
+        dot = sum(float(a) * float(b) for a, b in zip(left, right))
+        left_norm = math.sqrt(sum(float(a) * float(a) for a in left))
+        right_norm = math.sqrt(sum(float(b) * float(b) for b in right))
+        if left_norm <= 0 or right_norm <= 0:
+            return 0.0
+        return dot / (left_norm * right_norm)
+
+
+class _SecureCollectionAdapter:
+    def __init__(self, store: SecureVectorStore):
+        self.store = store
+
+    def add(self, embeddings, documents, metadatas, ids):
+        self.store.add_chunks(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+
+    def query(self, query_embeddings, n_results, include):
+        return self.store.query(query_embeddings=query_embeddings, n_results=n_results, include=include)
+
+    def get(self, where=None, include=None, ids=None):
+        return self.store.get(where=where, include=include, ids=ids)
+
+    def delete(self, ids):
+        self.store.delete(ids)
+
+
+def _b64(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _unb64(value: str) -> bytes:
+    return base64.b64decode(value.encode("ascii"))

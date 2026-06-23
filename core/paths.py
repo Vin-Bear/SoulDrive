@@ -16,7 +16,7 @@ def app_root():
 
 
 def local_data_root():
-    return app_root() / "souldrive_db"
+    return app_root() / "runtime"
 
 
 def model_search_dirs(workspace_path: str | None = None):

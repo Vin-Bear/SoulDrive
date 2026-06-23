@@ -24,11 +24,22 @@ def product_diagnostics() -> dict[str, Any]:
     policy = load_policy()
     state = get_runtime_state()
     workspace = _diagnostic_workspace(state)
-    workspace_report = workspace.diagnose()
-    audit_report = AuditLogger.for_workspace(workspace).verify_chain(limit=1000)
-    model_report = model_diagnostics(workspace.root_path)
+    workspace_path = workspace.root_path if workspace is not None else None
+    if workspace is None:
+        workspace_report = {
+            "ready": False,
+            "reason": "waiting for removable SoulDrive workspace",
+        }
+        audit_report = {
+            "ready": False,
+            "reason": "waiting for removable SoulDrive workspace",
+        }
+    else:
+        workspace_report = workspace.diagnose()
+        audit_report = AuditLogger.for_workspace(workspace).verify_chain(limit=1000)
+    model_report = model_diagnostics(workspace_path)
     license_report = verify_license_for_workspace(
-        workspace.root_path,
+        workspace_path,
         state.get("hardware_sn"),
         policy=policy,
     ).public_dict()
@@ -91,10 +102,12 @@ def model_diagnostics(workspace_path: str | None = None) -> dict[str, Any]:
     }
 
 
-def _diagnostic_workspace(state: dict[str, Any]) -> SoulDriveWorkspace:
+def _diagnostic_workspace(state: dict[str, Any]) -> SoulDriveWorkspace | None:
     if state.get("workspace_path"):
         return SoulDriveWorkspace(state["workspace_path"]).ensure()
-    return resolve_workspace(state.get("active_drive"))
+    if state.get("active_drive"):
+        return resolve_workspace(state.get("active_drive"))
+    return None
 
 
 def _redact_path(path: Path) -> str:

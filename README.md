@@ -64,10 +64,12 @@ cargo check
     souldrive-sidecar\
       souldrive-sidecar.exe
   SoulDrive\
+    data\documents\
     data\papers\
     index\
     audit\
     models\
+    runtime\
     config\workspace.json
 ```
 
@@ -81,17 +83,20 @@ cargo check
 
 ## 工作区约定
 
-SoulDrive 会在本地或授权存储中维护 `SoulDrive/` 工作区：
+SoulDrive 只把可移动盘根目录下的 `SoulDrive/` 作为业务工作区。桌面端未检测到该工作区时保持锁定，不会回退到项目目录或本机 `souldrive_db/`。
 
-- `data/papers/`：当前默认存放 PDF 知识文档，演示阶段仍以论文为主。
-- `index/`：Chroma、父子切片索引、关键词索引。
-- `graph/`：本地图数据库。
+- `data/documents/`：加密后的导入文档，是当前默认文档库。
+- `data/papers/`：兼容旧版本的明文 PDF 目录，只用于读取历史资料。
+- `index/`：Chroma、父子切片索引、关键词索引和图谱数据库。
 - `audit/`：hash-chain 审计日志。
 - `models/`：本地 GGUF 聊天模型和 BGE 嵌入模型。
+- `runtime/`：工作区运行态、索引状态和临时文件。
 
 当前开发重点是先把这些内部链路做清楚：文档进入、索引更新、检索证据、回答生成、运行态锁定和审计记录。
 
 ## 运行产物与编码
 
-- `souldrive_db/`、`models/`、`runtime/`、`node_modules/`、`souldrive-ui/dist/` 和 `souldrive-ui/src-tauri/target/` 都是本地运行或构建产物，不应提交。
+- `runtime/`、`models/`、`node_modules/`、`souldrive-ui/dist/` 和 `souldrive-ui/src-tauri/target/` 都是本地运行或构建产物，不应提交。
+- `souldrive_db/` 是旧版本机工作区残留，不再作为桌面端业务数据源；确认不需要历史数据后可以手动删除。
+- 项目根下的 `data/`、`index/`、`audit/`、`config/workspace.json` 属于旧伪工作区痕迹，不应保留或提交。
 - 中文源码和文档使用 UTF-8。PowerShell 读取中文文件时建议显式加 `-Encoding utf8`。

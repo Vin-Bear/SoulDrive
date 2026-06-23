@@ -37,6 +37,15 @@ from core.runtime_state import (
     unlock_runtime,
     update_indexing_status,
 )
+from core.security_context import (
+    WORKSPACE_DATA_KEY_ENV,
+    clear_workspace_keys,
+    export_workspace_data_key,
+    get_workspace_keys,
+    set_workspace_keys,
+)
+from core.secure_document_store import SecureDocumentStore
+from core.secure_vector_store import SecureVectorStore
 from core.tool_registry import build_default_tool_registry
 from core.workspace import SoulDriveWorkspace, is_souldrive_workspace, resolve_workspace
 from core.workspace_crypto import (
@@ -131,7 +140,23 @@ def current_workspace():
     state = get_runtime_state()
     if state.get("workspace_path"):
         return SoulDriveWorkspace(state["workspace_path"]).ensure()
-    return resolve_workspace(state.get("active_drive"))
+    if state.get("active_drive"):
+        return resolve_workspace(state.get("active_drive"))
+    raise RuntimeError("removable SoulDrive workspace is not mounted")
+
+
+def require_workspace_mounted():
+    state = get_runtime_state()
+    if state.get("workspace_path") or state.get("active_drive"):
+        return None
+    return JSONResponse(
+        {
+            "error": "SoulDrive removable workspace is not mounted",
+            "status": "locked",
+            "reason": "waiting for removable SoulDrive workspace",
+        },
+        status_code=423,
+    )
 
 
 def current_audit_logger():
@@ -216,6 +241,10 @@ def _subprocess_creation_flags() -> int:
 def _start_indexer_worker(workspace: SoulDriveWorkspace, auth_level: str):
     global indexer_process
     command = _indexer_worker_command(workspace, auth_level)
+    env = os.environ.copy()
+    workspace_keys = get_workspace_keys(workspace.root_path)
+    if workspace_keys is not None:
+        env[WORKSPACE_DATA_KEY_ENV] = export_workspace_data_key(workspace_keys)
     with indexer_lock:
         if indexer_process is not None:
             if indexer_process.poll() is None:
@@ -225,7 +254,7 @@ def _start_indexer_worker(workspace: SoulDriveWorkspace, auth_level: str):
         indexer_process = subprocess.Popen(
             command,
             cwd=str(app_root()),
-            env=os.environ.copy(),
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -251,7 +280,7 @@ def _stop_indexer_worker():
 
 
 def public_runtime_state():
-    state = get_runtime_state()
+    state = effective_runtime_state()
     public_state = dict(state)
     if public_state.get("active_drive"):
         public_state["active_drive"] = "mounted removable storage"
@@ -262,8 +291,33 @@ def public_runtime_state():
     return public_state
 
 
-def require_software_unlock():
+def effective_runtime_state():
     state = get_runtime_state()
+    workspace = _workspace_from_state(state)
+    if workspace is None:
+        return state
+    if state.get("locked") or not state.get("software_unlocked"):
+        return state
+    if not is_keystore_initialized(workspace):
+        return state
+    if get_workspace_keys(workspace.root_path) is not None:
+        return state
+
+    cleanup_runtime()
+    return mark_software_locked()
+
+
+def _workspace_from_state(state: dict | None = None):
+    state = state or get_runtime_state()
+    if state.get("workspace_path"):
+        return SoulDriveWorkspace(state["workspace_path"]).ensure()
+    if state.get("active_drive"):
+        return resolve_workspace(state.get("active_drive"))
+    return None
+
+
+def require_software_unlock():
+    state = effective_runtime_state()
     if state.get("locked") or not state.get("software_unlocked"):
         current_audit_logger().append_event("security.password_required", {
             "reason": state.get("security_reason") or state.get("reason") or "workspace passphrase required",
@@ -369,7 +423,7 @@ async def health():
 
 @app.get("/ready")
 async def ready():
-    state = get_runtime_state()
+    state = effective_runtime_state()
     ready_state = not state.get("locked")
     return JSONResponse(
         {
@@ -387,8 +441,11 @@ async def runtime_status():
 
 @app.get("/security/status")
 async def security_status():
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     workspace = current_workspace()
-    state = get_runtime_state()
+    state = effective_runtime_state()
     return {
         "crypto_initialized": is_keystore_initialized(workspace),
         "software_unlocked": bool(state.get("software_unlocked")),
@@ -399,43 +456,59 @@ async def security_status():
 
 @app.post("/security/init")
 async def security_init(request: SecurityInitRequest):
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     if not request.acknowledge_no_recovery:
         return JSONResponse({"error": "no recovery acknowledgement required"}, status_code=400)
 
     workspace = current_workspace()
     try:
         initialize_keystore(workspace, request.passphrase)
-        unlock_keystore(workspace, request.passphrase)
+        keys = unlock_keystore(workspace, request.passphrase)
     except KeystoreAlreadyInitializedError:
         return JSONResponse({"error": "workspace keystore already initialized"}, status_code=409)
 
+    set_workspace_keys(workspace.root_path, keys)
     current_audit_logger().append_event("security.keystore_initialized", {"no_recovery": True})
     mark_software_unlocked()
     return {"initialized": True, "software_unlocked": True, "state": public_runtime_state()}
 
 @app.post("/security/unlock")
 async def security_unlock(request: SecurityUnlockRequest):
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     workspace = current_workspace()
     try:
-        unlock_keystore(workspace, request.passphrase)
+        keys = unlock_keystore(workspace, request.passphrase)
     except KeystoreNotInitializedError:
         return JSONResponse({"error": "workspace keystore is not initialized"}, status_code=409)
     except IncorrectPassphraseError:
         current_audit_logger().append_event("security.unlock_failed", {"reason": "incorrect passphrase"})
         return JSONResponse({"error": "incorrect passphrase"}, status_code=403)
 
+    set_workspace_keys(workspace.root_path, keys)
     mark_software_unlocked()
     return {"software_unlocked": True, "state": public_runtime_state()}
 
 @app.post("/security/lock")
 async def security_lock():
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     _stop_indexer_worker()
     cleanup_runtime()
+    workspace = current_workspace()
+    clear_workspace_keys(workspace.root_path)
     mark_software_locked()
     return {"software_unlocked": False, "state": public_runtime_state()}
 
 @app.get("/documents/list")
 async def documents_list():
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     return _document_library_payload(current_workspace())
 
 
@@ -446,6 +519,9 @@ async def documents_import(request: PaperImportRequest):
 
 @app.get("/papers/list")
 async def papers_list():
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     payload = _document_library_payload(current_workspace())
     payload["paper_count"] = payload["document_count"]
     payload["papers"] = payload["documents"]
@@ -459,6 +535,9 @@ async def papers_import(request: PaperImportRequest):
 
 @app.post("/index/run")
 async def index_run():
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     locked_response = require_software_unlock()
     if locked_response is not None:
         return locked_response
@@ -503,8 +582,13 @@ def workspace_diagnostics():
     state = get_runtime_state()
     if state.get("workspace_path"):
         workspace = SoulDriveWorkspace(state["workspace_path"]).ensure()
-    else:
+    elif state.get("active_drive"):
         workspace = resolve_workspace(state.get("active_drive"))
+    else:
+        return {
+            "ready": False,
+            "reason": "waiting for removable SoulDrive workspace",
+        }
     return workspace.diagnose()
 
 
@@ -516,9 +600,24 @@ def audit_verify_report(limit: int | None = None):
 
 
 def _indexed_source_filenames(workspace: SoulDriveWorkspace) -> set[str]:
+    sources = set()
+    workspace_keys = get_workspace_keys(workspace.root_path)
+    if workspace_keys is not None and Path(workspace.secure_vector_store_path).exists():
+        try:
+            store = SecureVectorStore(workspace.secure_vector_store_path, workspace_keys)
+            try:
+                payload = store.collection.get(include=["metadatas"])
+                for metadata in payload.get("metadatas") or []:
+                    if metadata and metadata.get("source_filename"):
+                        sources.add(str(metadata["source_filename"]))
+            finally:
+                store.close()
+        except Exception:
+            pass
+
     db_path = Path(workspace.parent_doc_path)
     if not db_path.exists():
-        return set()
+        return sources
 
     try:
         with sqlite3.connect(str(db_path)) as conn:
@@ -528,17 +627,35 @@ def _indexed_source_filenames(workspace: SoulDriveWorkspace) -> set[str]:
                 WHERE json_extract(metadata_json, '$.source_filename') IS NOT NULL
             """).fetchall()
     except Exception:
-        return set()
+        return sources
 
-    return {str(row[0]) for row in rows if row and row[0]}
+    sources.update(str(row[0]) for row in rows if row and row[0])
+    return sources
 
 
 def _document_library_payload(workspace: SoulDriveWorkspace) -> dict:
-    documents_dir = Path(workspace.papers_path)
     indexed_sources = _indexed_source_filenames(workspace)
     documents = []
+    seen_names = set()
+
+    workspace_keys = get_workspace_keys(workspace.root_path)
+    if workspace_keys is not None:
+        store = SecureDocumentStore(workspace, workspace_keys)
+        try:
+            for item in store.list_documents():
+                documents.append({
+                    **item,
+                    "indexed": item["name"] in indexed_sources,
+                })
+                seen_names.add(item["name"])
+        finally:
+            store.close()
+
+    documents_dir = Path(workspace.papers_path)
 
     for path in sorted(documents_dir.rglob("*.pdf"), key=lambda item: item.name.lower()):
+        if path.name in seen_names:
+            continue
         stat = path.stat()
         documents.append({
             "name": path.name,
@@ -558,6 +675,9 @@ def _document_library_payload(workspace: SoulDriveWorkspace) -> dict:
 
 
 def _import_documents(request: PaperImportRequest):
+    mounted_response = require_workspace_mounted()
+    if mounted_response is not None:
+        return mounted_response
     locked_response = require_software_unlock()
     if locked_response is not None:
         return locked_response
@@ -635,7 +755,14 @@ async def runtime_unlock(request: RuntimeRequest):
     elif state.get("workspace_path"):
         workspace = SoulDriveWorkspace(state["workspace_path"]).ensure()
     else:
-        workspace = resolve_workspace(None)
+        return JSONResponse(
+            {
+                "error": "SoulDrive removable workspace is not mounted",
+                "status": "locked",
+                "reason": "waiting for removable SoulDrive workspace",
+            },
+            status_code=423,
+        )
     return unlock_runtime(
         auth_level=request.auth_level,
         hardware_sn=request.hardware_sn,

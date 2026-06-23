@@ -25,6 +25,11 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
+import {
+  formatSecurityActionError,
+  readSecurityActionError,
+  securityPanelMode,
+} from "./securityErrors";
 
 interface Message {
   role: "user" | "ai";
@@ -141,6 +146,13 @@ interface ProductDiagnostics {
     ready: boolean;
     missing: string[];
     runtime?: {
+      chat_model?: {
+        selected?: string;
+      };
+      reranker?: {
+        selected?: string | null;
+        mode?: string;
+      };
       config?: {
         n_gpu_layers?: number;
         gpu_mode?: string;
@@ -862,14 +874,18 @@ export default function App() {
         },
         body: JSON.stringify({ passphrase, acknowledge_no_recovery: acknowledgeNoRecovery }),
       });
-      if (!response.ok) throw new Error("security init failed");
+      if (!response.ok) {
+        setSecurityMessage(await readSecurityActionError("init", response));
+        if (response.status === 409) await refreshSecurityAfterChange();
+        return;
+      }
       setPassphrase("");
       setConfirmPassphrase("");
       setAcknowledgeNoRecovery(false);
       setSecurityMessage("工作区已初始化并解锁");
       await refreshSecurityAfterChange();
     } catch {
-      setSecurityMessage("初始化失败，请检查本地服务状态");
+      setSecurityMessage(formatSecurityActionError("init", 0));
     } finally {
       setSecurityBusy(false);
     }
@@ -888,12 +904,16 @@ export default function App() {
         },
         body: JSON.stringify({ passphrase }),
       });
-      if (!response.ok) throw new Error("security unlock failed");
+      if (!response.ok) {
+        setSecurityMessage(await readSecurityActionError("unlock", response));
+        if (response.status === 409) await refreshSecurityAfterChange();
+        return;
+      }
       setPassphrase("");
       setSecurityMessage("工作区已解锁");
       await refreshSecurityAfterChange();
     } catch {
-      setSecurityMessage("口令错误或工作区不可用");
+      setSecurityMessage(formatSecurityActionError("unlock", 0));
     } finally {
       setSecurityBusy(false);
     }
@@ -906,6 +926,11 @@ export default function App() {
 
   const diagnosticSummary = summarizeDiagnostics(productDiagnostics, healthStatus);
   const gpuConfig = productDiagnostics?.models?.runtime?.config;
+  const selectedChatModel = productDiagnostics?.models?.runtime?.chat_model?.selected || "未检测";
+  const selectedReranker =
+    productDiagnostics?.models?.runtime?.reranker?.selected ||
+    (productDiagnostics?.models?.runtime?.reranker?.mode === "disabled" ? "未启用" : "未检测");
+  const workspaceSecurityMode = securityPanelMode(securityStatus);
   const modelAccelerationLabel =
     typeof gpuConfig?.n_gpu_layers === "number" && gpuConfig.n_gpu_layers > 0
       ? `GPU ${gpuConfig.n_gpu_layers}`
@@ -945,7 +970,14 @@ export default function App() {
                 工作区解锁
               </span>
             </div>
-            {!securityStatus?.crypto_initialized ? (
+            {workspaceSecurityMode === "unavailable" ? (
+              <div className="diagnostic-summary warn">
+                <div>
+                  <strong>WAITING</strong>
+                  <span>正在等待本地安全服务；如长时间未恢复，请更新或重新打包 sidecar。</span>
+                </div>
+              </div>
+            ) : workspaceSecurityMode === "initialize" ? (
               <div className="security-form">
                 <p>该口令用于保护本地工作区主密钥。SoulDrive 不会保存口令，也不提供找回能力。忘记口令后，该 U 盘中的加密知识库将无法解锁。</p>
                 <input
@@ -975,7 +1007,7 @@ export default function App() {
                   初始化并解锁
                 </button>
               </div>
-            ) : securityStatus.software_unlocked ? (
+            ) : workspaceSecurityMode === "unlocked" ? (
               <div className="diagnostic-summary ok">
                 <div>
                   <strong>UNLOCKED</strong>
@@ -1140,6 +1172,14 @@ export default function App() {
                 <strong>{modelAccelerationLabel}</strong>
               </div>
               <div>
+                <span>回答模型</span>
+                <strong>{selectedChatModel}</strong>
+              </div>
+              <div>
+                <span>Reranker</span>
+                <strong>{selectedReranker}</strong>
+              </div>
+              <div>
                 <span>请求数</span>
                 <strong>{runtimeMetrics?.total_requests ?? 0}</strong>
               </div>
@@ -1163,7 +1203,7 @@ export default function App() {
             </div>
             <div className="model-badge">
               <KeyRound size={14} />
-              {modelAccelerationLabel}
+              {selectedChatModel}
             </div>
           </div>
 

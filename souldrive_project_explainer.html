@@ -583,7 +583,7 @@
         </article>
         <article class="card">
           <strong>3. 工作区抽象</strong>
-          <p><code>core/workspace.py</code> 把知识文档、索引、模型、审计和运行态统一放到 <code>SoulDrive/</code> 或本地 <code>souldrive_db/</code> 下，避免业务代码写死盘符。</p>
+          <p><code>core/workspace.py</code> 把知识文档、索引、模型、审计和运行态统一放到可移动盘 <code>SoulDrive/</code> 下；未挂载工作区时保持锁定，不回退到本机库。</p>
         </article>
         <article class="card">
           <strong>4. 文档解析与索引</strong>

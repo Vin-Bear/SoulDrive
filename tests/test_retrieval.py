@@ -27,6 +27,29 @@ class RetrievalTests(unittest.TestCase):
         self.assertGreater(ranked[0].keyword_score, 0)
         self.assertIn("final", ranked[0].score_breakdown)
 
+    def test_hybrid_rank_uses_prefilled_reranker_score(self):
+        candidates = [
+            SearchCandidate(
+                id="lexical-only",
+                content="This paper discusses generic transformer pretraining.",
+                metadata={"source_filename": "generic.pdf"},
+                dense_rank=1,
+            ),
+            SearchCandidate(
+                id="reranked-best",
+                content="GraphRAG builds graph communities for paper summarization and local search.",
+                metadata={"source_filename": "graphrag.pdf"},
+                dense_rank=8,
+                rerank_score=0.95,
+            ),
+        ]
+
+        ranked = rank_hybrid_candidates("GraphRAG paper local search", candidates, top_k=2)
+
+        self.assertEqual(ranked[0].id, "reranked-best")
+        self.assertGreaterEqual(ranked[0].rerank_score, 0.95)
+        self.assertIn("semantic_rerank", ranked[0].score_breakdown)
+
     def test_build_citations_exposes_source_and_page(self):
         candidate = SearchCandidate(
             id="doc_0",

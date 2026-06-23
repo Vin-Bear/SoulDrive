@@ -2,6 +2,8 @@ import hashlib
 import shutil
 from pathlib import Path
 
+from core.secure_document_store import SecureDocumentStore
+from core.security_context import get_workspace_keys
 from core.workspace import SoulDriveWorkspace
 
 
@@ -26,6 +28,14 @@ def import_paper_into_workspace(workspace: SoulDriveWorkspace, source_path: str)
     papers_dir.mkdir(parents=True, exist_ok=True)
     base_destination = papers_dir / safe_pdf_filename(source.name)
 
+    workspace_keys = get_workspace_keys(workspace.root_path)
+    if workspace_keys is not None:
+        store = SecureDocumentStore(workspace, workspace_keys)
+        try:
+            return store.import_document(source_path)
+        finally:
+            store.close()
+
     try:
         if source.resolve() == base_destination.resolve():
             return {
@@ -47,16 +57,6 @@ def import_paper_into_workspace(workspace: SoulDriveWorkspace, source_path: str)
         "name": destination.name,
         "status": "imported",
     }
-
-
-def import_drive_root_papers(drive_path: str, workspace: SoulDriveWorkspace) -> list[dict]:
-    root = Path(drive_path)
-    if not root.exists():
-        return []
-    return [
-        import_paper_into_workspace(workspace, str(path))
-        for path in sorted(root.glob("*.pdf"), key=lambda item: item.name.lower())
-    ]
 
 
 def safe_pdf_filename(filename: str) -> str:

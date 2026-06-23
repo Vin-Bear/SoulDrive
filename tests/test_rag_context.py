@@ -1,6 +1,6 @@
 import unittest
 
-from core.rag_engine import build_fast_evidence_answer, compact_context_text, normalize_technical_terms
+from core.rag_engine import build_evidence_mindmap, compact_context_text, normalize_technical_terms
 
 
 class RagContextTests(unittest.TestCase):
@@ -14,10 +14,10 @@ class RagContextTests(unittest.TestCase):
         self.assertIn("token499", compacted)
         self.assertIn("context trimmed", compacted)
 
-    def test_fast_transformer_answer_uses_citations(self):
-        answer = build_fast_evidence_answer(
+    def test_transformer_mindmap_uses_citations(self):
+        answer = build_evidence_mindmap(
             "transformer机制是什么",
-            [{"id": "E1"}, {"id": "E2"}, {"id": "E3"}],
+            [{"id": "E1", "section": "Transformer"}, {"id": "E2"}, {"id": "E3"}],
         )
 
         self.assertIsNotNone(answer)

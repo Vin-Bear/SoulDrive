@@ -37,12 +37,21 @@ class ScriptTests(unittest.TestCase):
         self.assertIn('"_internal\\llama_cpp\\lib\\ggml-cuda.lib"', script)
         self.assertIn('"_internal\\cublasLt64_12.dll"', script)
         self.assertIn("opencv_videoio_ffmpeg*.dll", script)
+        self.assertNotIn("--exclude-module torchvision", script)
 
     def test_package_sidecar_includes_chromadb_dynamic_runtime_imports(self):
         script = (ROOT / "scripts" / "package-sidecar.ps1").read_text(encoding="utf-8")
 
         self.assertIn("--hidden-import chromadb.telemetry.product.posthog", script)
         self.assertIn("--hidden-import chromadb.api.rust", script)
+
+    def test_tauri_dev_prefers_source_backend_over_packaged_sidecar(self):
+        source = (ROOT / "souldrive-ui" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+
+        self.assertIn("prefer_source_backend", source)
+        self.assertIn("SOULDRIVE_DEV_USE_PACKAGED_SIDECAR", source)
+        self.assertIn('"conda"', source)
+        self.assertIn('"souldrive"', source)
 
 
 if __name__ == "__main__":

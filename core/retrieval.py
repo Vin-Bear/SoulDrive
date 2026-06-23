@@ -137,8 +137,10 @@ def rank_hybrid_candidates(
     for candidate in candidates:
         graph_norm = candidate.graph_score / max_graph_score if max_graph_score > 0 else 0.0
         lexical_score = lexical_rerank_score(query, candidate.content)
+        semantic_score = max(candidate.rerank_score, 0.0)
+        combined_rerank = max(lexical_score, semantic_score)
         candidate.rrf_score = rrf_scores.get(candidate.id, 0.0)
-        candidate.rerank_score = lexical_score
+        candidate.rerank_score = combined_rerank
         candidate.final_score = (
             0.52 * candidate.rrf_score
             + 0.28 * candidate.rerank_score
@@ -147,7 +149,8 @@ def rank_hybrid_candidates(
         )
         candidate.score_breakdown = {
             "rrf": round(candidate.rrf_score, 6),
-            "lexical_rerank": round(candidate.rerank_score, 6),
+            "lexical_rerank": round(lexical_score, 6),
+            "semantic_rerank": round(semantic_score, 6),
             "graph": round(graph_norm, 6),
             "keyword": round(candidate.keyword_score, 6),
             "final": round(candidate.final_score, 6),

@@ -1,17 +1,26 @@
-import os
 import gc
 import json
+import os
+import re
 import time
 import uuid
-from core.answer_quality import citation_coverage, evaluate_evidence_gate, refusal_answer
+
+from core.answer_quality import (
+    citation_coverage,
+    evaluate_evidence_gate,
+    refusal_answer,
+    validate_answer_citations,
+)
 from core.audit_log import default_audit_logger
-from core.knowledge_base import LocalKnowledgeBase
 from core.graph_db import LocalGraphDB
+from core.knowledge_base import LocalKnowledgeBase
+from core.logging_config import get_logger
 from core.model_runtime import llama_runtime_config, load_llama_with_gpu_fallback, resolve_chat_model_path
 from core.observability import runtime_metrics
-from core.logging_config import get_logger
+
 
 MAX_CONTEXT_CHARS_PER_EVIDENCE = 1800
+ANSWER_RETRY_LIMIT = 1
 
 logger = get_logger(__name__)
 
@@ -26,50 +35,46 @@ class RAGEngine:
     ):
         self.kb = kb
         self.audit_logger = audit_logger or default_audit_logger
-        self.graph_db = LocalGraphDB(db_path=graph_db_path) if graph_db_path else LocalGraphDB()
+        if not graph_db_path:
+            raise ValueError("graph_db_path is required for RAGEngine")
+        self.graph_db = LocalGraphDB(db_path=graph_db_path)
         self.runtime_config = llama_runtime_config(workspace_path)
         model_path = resolve_chat_model_path(workspace_path, self.runtime_config)
-        logger.info("[RAG Engine] 正在物理层挂载 GGUF 离线模型: %s", os.path.basename(model_path))
+        logger.info("[RAG Engine] Loading local GGUF model: %s", os.path.basename(model_path))
 
         if not os.path.exists(model_path):
             runtime_metrics.increment("model_load_failures")
-            message = f"[致命错误] 找不到模型文件: {model_path}\n请确保已将模型放入 SoulDrive/models 或配置 SOULDRIVE_MODEL_DIR。"
+            message = (
+                f"chat model not found: {model_path}. "
+                "Place the model inside SoulDrive/models or configure SOULDRIVE_MODEL_DIR."
+            )
             runtime_metrics.record_error(message)
             raise FileNotFoundError(message)
 
-        try:
-            load_result = load_llama_with_gpu_fallback(
-                model_path=model_path,
-                config=self.runtime_config,
-                n_ctx=self.runtime_config.chat_n_ctx,
-            )
-            self.llm = load_result.model
-            self.runtime_config = load_result.effective_config
-            runtime_metrics.record_model_load(load_result.load_ms)
-            if load_result.fallback_error:
-                runtime_metrics.record_error(f"GPU fallback: {load_result.fallback_error}")
-                logger.warning("[RAG Engine] GPU 初始化失败，已自动回退 CPU 推理。")
-        except Exception as exc:
-            runtime_metrics.increment("model_load_failures")
-            runtime_metrics.record_error(str(exc))
-            raise
-        logger.info("[RAG Engine] C++ 推理引擎初始化完毕，真·单体免驱就绪！")
+        load_result = load_llama_with_gpu_fallback(
+            model_path=model_path,
+            config=self.runtime_config,
+            n_ctx=self.runtime_config.chat_n_ctx,
+        )
+        self.llm = load_result.model
+        self.runtime_config = load_result.effective_config
+        runtime_metrics.record_model_load(load_result.load_ms)
+        if load_result.fallback_error:
+            runtime_metrics.record_error(f"GPU fallback: {load_result.fallback_error}")
 
     def close(self):
-        """释放本地 LLM 和图谱连接，供 U 盘拔出时执行安全清场。"""
-        if hasattr(self, "graph_db") and self.graph_db is not None:
+        if getattr(self, "graph_db", None) is not None:
             self.graph_db.close()
             self.graph_db = None
-
-        if hasattr(self, "llm") and self.llm is not None:
+        if getattr(self, "llm", None) is not None:
             close_fn = getattr(self.llm, "close", None)
             if callable(close_fn):
                 close_fn()
             self.llm = None
-
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
@@ -77,127 +82,119 @@ class RAGEngine:
             pass
 
     def generate_response_stream(self, query: str, top_k: int = 3, trace_id: str | None = None):
-        """工业级流式生成器：结合本地图谱数据，输出防幻觉的流式回答"""
         trace_id = trace_id or str(uuid.uuid4())
         started_at = time.time()
 
-        # 1. 混合向量召回
         try:
-            retrieval_result = self.kb.search_with_evidence(
-                query=query,
-                graph_db=self.graph_db,
-                top_k=top_k
+            retrieval_result = self.kb.search_with_evidence(query=query, graph_db=self.graph_db, top_k=top_k)
+        except Exception as exc:
+            runtime_metrics.increment("retrieval_failures")
+            runtime_metrics.record_error(str(exc))
+            self.audit_logger.append_event(
+                "rag.retrieve_failed",
+                {"query_chars": len(query), "error": str(exc)},
+                trace_id=trace_id,
             )
-            vector_docs = retrieval_result["documents"]
-            vector_metas = retrieval_result["metadatas"]
-            graph_context = retrieval_result["graph_context"]
-            evidence = retrieval_result["evidence"]
-            self.audit_logger.append_event("rag.retrieved", {
+            yield f"本地知识库暂未就绪。错误信息：{str(exc)}"
+            return
+
+        vector_docs = retrieval_result["documents"]
+        vector_metas = retrieval_result["metadatas"]
+        graph_context = retrieval_result["graph_context"]
+        evidence = retrieval_result["evidence"]
+        self.audit_logger.append_event(
+            "rag.retrieved",
+            {
                 "query_chars": len(query),
                 "top_k": top_k,
                 "retrieval_mode": retrieval_result["retrieval_mode"],
                 "evidence_count": len(evidence),
                 "matched_entities": retrieval_result["matched_entities"],
-                "sources": [item["source_filename"] for item in evidence],
-            }, trace_id=trace_id)
-        except Exception as e:
-            runtime_metrics.increment("retrieval_failures")
-            runtime_metrics.record_error(str(e))
-            self.audit_logger.append_event("rag.retrieve_failed", {
-                "query_chars": len(query),
-                "error": str(e),
-            }, trace_id=trace_id)
-            yield f"本地知识库未就绪。错误信息: {str(e)}"
-            return
+                "sources": [item.get("source_filename") for item in evidence],
+            },
+            trace_id=trace_id,
+        )
 
-        evidence_gate = evaluate_evidence_gate(evidence)
-        if not evidence_gate.allowed:
+        evidence_gate = evaluate_evidence_gate(evidence, query=query)
+        if evidence_gate.decision in ("reject", "retry"):
             answer = refusal_answer(query, evidence_gate)
-            self.audit_logger.append_event("rag.refused_low_evidence", {
-                "query_chars": len(query),
-                "gate": evidence_gate.public_dict(),
-            }, trace_id=trace_id)
+            self.audit_logger.append_event(
+                "rag.refused_low_evidence",
+                {"query_chars": len(query), "gate": evidence_gate.public_dict()},
+                trace_id=trace_id,
+            )
             yield answer
-            yield "\n\n```souldrive-evidence\n"
-            yield json.dumps(evidence, ensure_ascii=False, indent=2)
-            yield "\n```"
+            yield _evidence_block(evidence)
             return
 
-        fast_answer = build_fast_evidence_answer(query, evidence)
-        if fast_answer:
-            self.audit_logger.append_event("rag.fast_answered", {
+        vector_context = build_vector_context(vector_docs, vector_metas, evidence)
+        graph_context_text = build_graph_context(graph_context)
+        messages = build_answer_messages(query, vector_context, graph_context_text)
+
+        generated_text = None
+        validation_report = None
+        for attempt in range(ANSWER_RETRY_LIMIT + 1):
+            attempt_messages = messages
+            if attempt > 0:
+                attempt_messages = messages + [
+                    {
+                        "role": "assistant",
+                        "content": "上一次回答未通过引用校验，请只输出有合法 [E1] 证据引用支持的答案。",
+                    }
+                ]
+
+            candidate_text = self._generate_answer_text(attempt_messages)
+            validation_report = validate_answer_citations(candidate_text, evidence)
+            if validation_report["valid"]:
+                generated_text = candidate_text
+                break
+
+            repaired_text = repair_missing_citations(candidate_text, evidence, validation_report)
+            if repaired_text != candidate_text:
+                repaired_report = validate_answer_citations(repaired_text, evidence)
+                if repaired_report["valid"]:
+                    generated_text = repaired_text
+                    validation_report = repaired_report
+                    break
+
+            self.audit_logger.append_event(
+                "rag.answer_retry",
+                {
+                    "query_chars": len(query),
+                    "attempt": attempt + 1,
+                    "reason": validation_report["reason"],
+                },
+                trace_id=trace_id,
+            )
+
+        if generated_text is None:
+            answer = evidence_fallback_answer(query, evidence)
+            self.audit_logger.append_event(
+                "rag.refused_invalid_answer",
+                {"query_chars": len(query), "validation": validation_report},
+                trace_id=trace_id,
+            )
+            yield answer
+            yield _evidence_block(evidence)
+            return
+
+        citation_report = citation_coverage(generated_text, evidence)
+        self.audit_logger.append_event(
+            "rag.completed",
+            {
                 "query_chars": len(query),
+                "elapsed_ms": int((time.time() - started_at) * 1000),
                 "evidence_count": len(evidence),
-            }, trace_id=trace_id)
-            yield fast_answer
-            if query_requests_mindmap(query):
-                yield "\n\n```souldrive-mindmap\n"
-                yield build_evidence_mindmap(query, evidence)
-                yield "\n```"
-            yield "\n\n```souldrive-evidence\n"
-            yield json.dumps(evidence, ensure_ascii=False, indent=2)
-            yield "\n```"
-            return
-
-        # ==========================================
-        # 2. 组装向量文本块 (Vector Context) -> 负责“具体细节”
-        # ==========================================
-        vector_context_str = ""
-        if vector_docs:
-            for i, doc in enumerate(vector_docs):
-                # 提取我们在 indexer 阶段强行注入的元数据 (防崩溃处理)
-                source = vector_metas[i].get("source_filename", "未知文件") if vector_metas else "未知文件"
-                evidence_id = evidence[i]["id"] if i < len(evidence) else f"E{i + 1}"
-                section = evidence[i].get("section") if i < len(evidence) else None
-                chunk_index = evidence[i].get("chunk_index") if i < len(evidence) else None
-                context_text = compact_context_text(doc, MAX_CONTEXT_CHARS_PER_EVIDENCE)
-                vector_context_str += (
-                    f"[{evidence_id} | 来源: {source} | 章节: {section or '未知'} | 切片: {chunk_index}]\n"
-                    f"{context_text}\n\n"
-                )
-        else:
-            vector_context_str = "未检索到直接相关的文献段落。\n"
-
-        # ==========================================
-        # 3. 组装图谱逻辑链 (Graph Context) -> 负责“宏观逻辑与关联”
-        # ==========================================
-        if graph_context:
-            graph_context_str = "【知识图谱逻辑链 (实体关系)】：\n" + "\n".join(graph_context) + "\n\n"
-        else:
-            graph_context_str = ""
-
-        # ==========================================
-        # 4. 构建大模型专属的 Hybrid Prompt (工业级防幻觉提示词)
-        # ==========================================
-        system_prompt = (
-            "你是一个基于本地端侧知识引擎的高级 AI 架构师。\n"
-            "请严格遵循以下规则作答：\n"
-            "1. 你的回答必须完全基于提供的 <context>，绝不能使用你的预训练知识捏造事实。\n"
-            "2. 如果 <context> 中包含【知识图谱逻辑链】，请优先参考该逻辑链来梳理回答的骨架。\n"
-            "3. 如果 <context> 中包含【私有文献详情】，请提取其中的数据和原文细节来丰满你的回答。\n"
-            "4. 如果信息不足以回答问题，请直接回答“根据本地存储的知识库，未找到相关信息”。"
-            "5. 每个关键结论必须使用 [E1]、[E2] 这类证据编号标注来源；没有证据支撑的结论不要输出。"
-            "6. Transformer、Attention、BERT、RoBERTa 等技术名词保持英文原名，不要翻译成“变压器”等非技术含义。"
-            "7. 默认用 4 到 7 条要点回答，先说明机制，再说明论文依据；除非用户要求详细展开，不要输出冗长综述。"
-            "8. 如果用户要求生成思维导图、导图、结构图或知识图谱，请在正常回答后追加一个 "
-            "```souldrive-mindmap 代码块，代码块内部使用 Markdown 标题和项目符号表达回答结构；"
-            "导图必须围绕用户问题组织，不要把来源、线索或文件名当成主要节点。"
+                "citation_coverage": citation_report,
+            },
+            trace_id=trace_id,
         )
+        yield generated_text
+        if query_requests_mindmap(query) and "souldrive-mindmap" not in generated_text.lower():
+            yield _mindmap_block(build_evidence_mindmap(query, evidence))
+        yield _evidence_block(evidence)
 
-        user_prompt = (
-            f"<context>\n"
-            f"{graph_context_str}"
-            f"【私有文献详情】：\n{vector_context_str}"
-            f"</context>\n\n"
-            f"<user_query>\n{query}\n</user_query>"
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        # 4. 触发 C++ 底层流式推理 (企业级采样与截断策略)
+    def _generate_answer_text(self, messages: list[dict[str, str]]) -> str:
         try:
             stream = self.llm.create_chat_completion(
                 messages=messages,
@@ -206,44 +203,207 @@ class RAGEngine:
                 top_p=self.runtime_config.top_p,
                 repeat_penalty=self.runtime_config.repeat_penalty,
                 max_tokens=self.runtime_config.max_tokens,
-                stop=["</context>", "<user_query>", "<|im_end|>"]  # 【企业级刹车片】：一旦模型开始幻觉输出这些边界词，底层 C++ 引擎会瞬间强行掐断！
+                stop=["</context>", "<user_query>", "<|im_end|>"],
             )
-
-            generated_parts = []
-            for chunk in stream:
-                if 'choices' in chunk and len(chunk['choices']) > 0:
-                    delta = chunk['choices'][0].get('delta', {})
-                    if 'content' in delta:
-                        content = normalize_technical_terms(delta['content'])
-                        generated_parts.append(content)
-                        yield content
-
-            citation_report = citation_coverage("".join(generated_parts), evidence)
-
-            self.audit_logger.append_event("rag.completed", {
-                "query_chars": len(query),
-                "elapsed_ms": int((time.time() - started_at) * 1000),
-                "evidence_count": len(evidence),
-                "citation_coverage": citation_report,
-            }, trace_id=trace_id)
-            generated_text = "".join(generated_parts)
-            if query_requests_mindmap(query) and "souldrive-mindmap" not in generated_text.lower():
-                yield "\n\n```souldrive-mindmap\n"
-                yield build_evidence_mindmap(query, evidence)
-                yield "\n```"
-            yield "\n\n```souldrive-evidence\n"
-            yield json.dumps(evidence, ensure_ascii=False, indent=2)
-            yield "\n```"
-
-        except Exception as e:
+        except Exception as exc:
             runtime_metrics.increment("generation_failures")
-            runtime_metrics.record_error(str(e))
-            self.audit_logger.append_event("rag.generate_failed", {
-                "query_chars": len(query),
-                "elapsed_ms": int((time.time() - started_at) * 1000),
-                "error": str(e),
-            }, trace_id=trace_id)
-            yield f"\n\n[系统保护机制触发] 推理进程已拦截异常: {str(e)}"
+            runtime_metrics.record_error(str(exc))
+            raise
+
+        generated_parts = []
+        for chunk in stream:
+            if "choices" not in chunk or not chunk["choices"]:
+                continue
+            delta = chunk["choices"][0].get("delta", {})
+            content = delta.get("content")
+            if content:
+                generated_parts.append(normalize_technical_terms(content))
+        return "".join(generated_parts).strip()
+
+
+def build_vector_context(vector_docs: list[str], vector_metas: list[dict], evidence: list[dict]) -> str:
+    if not vector_docs:
+        return "未检索到直接相关的文献片段。"
+
+    blocks = []
+    for index, doc in enumerate(vector_docs):
+        metadata = vector_metas[index] if index < len(vector_metas) else {}
+        evidence_item = evidence[index] if index < len(evidence) else {}
+        source = metadata.get("source_filename", "未知文件")
+        evidence_id = evidence_item.get("id", f"E{index + 1}")
+        section = evidence_item.get("section") or "未知章节"
+        chunk_index = evidence_item.get("chunk_index")
+        blocks.append(
+            f"[{evidence_id} | 来源: {source} | 章节: {section} | 切片: {chunk_index}]\n"
+            f"{compact_context_text(doc, MAX_CONTEXT_CHARS_PER_EVIDENCE)}"
+        )
+    return "\n\n".join(blocks)
+
+
+def build_graph_context(graph_context: list[str]) -> str:
+    if not graph_context:
+        return ""
+    return "【知识图谱关系】\n" + "\n".join(graph_context)
+
+
+def repair_missing_citations(answer: str, evidence: list[dict], validation_report: dict) -> str:
+    if validation_report.get("reason") != "answer missing evidence citation":
+        return answer
+    if not (answer or "").strip() or not evidence:
+        return answer
+
+    primary_id = evidence[0].get("id")
+    if not primary_id:
+        return answer
+
+    stripped = answer.strip()
+    if not answer_overlaps_evidence(stripped, evidence[0]):
+        return answer
+    if stripped.endswith(f"[{primary_id}]"):
+        return stripped
+    return f"{stripped} [{primary_id}]"
+
+
+def answer_overlaps_evidence(answer: str, evidence_item: dict) -> bool:
+    answer_terms = citation_repair_terms(answer)
+    evidence_terms = citation_repair_terms(evidence_text(evidence_item))
+    if not answer_terms or not evidence_terms:
+        return False
+    return len(answer_terms & evidence_terms) >= 2
+
+
+def citation_repair_terms(text: str) -> set[str]:
+    normalized = re.sub(r"\[E\d+\]", "", text or "")
+    terms = {token.lower() for token in re.findall(r"[A-Za-z0-9_]{3,}", normalized)}
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        max_size = min(4, len(chunk))
+        for size in range(2, max_size + 1):
+            for index in range(0, len(chunk) - size + 1):
+                terms.add(chunk[index : index + size])
+    return {term for term in terms if len(term) >= 2}
+
+
+def evidence_fallback_answer(query: str, evidence: list[dict]) -> str:
+    if not evidence:
+        return "根据本地存储的知识库，未找到足够可靠的相关证据，因此不会生成可能误导的回答。"
+
+    points = synthesize_evidence_points(query, evidence)
+    if points:
+        intro = fallback_intro(query)
+        lines = [intro]
+        for point, evidence_id in points[:4]:
+            lines.append(f"- {point} [{evidence_id}]")
+        return "\n".join(lines)
+
+    lines = ["根据已检索到的证据，主要信息包括："]
+    for item in evidence[:3]:
+        evidence_id = item.get("id") or "E?"
+        snippet = clean_evidence_sentence(item.get("snippet") or item.get("section") or "")
+        if snippet:
+            lines.append(f"- {compact_context_text(snippet, 120)} [{evidence_id}]")
+
+    if len(lines) == 1:
+        return "根据本地知识库，检索到了相关证据，但证据摘录不足以形成完整回答。"
+    return "\n".join(lines)
+
+
+def build_answer_messages(query: str, vector_context: str, graph_context: str) -> list[dict[str, str]]:
+    system_prompt = (
+        "你是 SoulDrive 的本地知识问答助手。"
+        "你只能依据给定的 <context> 回答，不允许使用未在证据中出现的事实。"
+        "你的任务是回答用户问题，先归纳结论，再给出依据；不要复制证据原文、论文标题、作者列表或摘要全文。"
+        "默认用 2 到 5 条中文要点回答，每条要点只表达一个结论，并用一句话解释它为什么回答了问题。"
+        "每个关键结论都必须带上 [E1]、[E2] 这类证据引用。"
+        "如果证据不足，只能明确说明未找到足够可靠的相关证据。"
+        "如果证据只支持问题的一部分，也必须诚实说明范围限制。"
+        "技术名词如 Transformer、Attention、BERT、RoBERTa 保持英文原名。"
+    )
+    user_prompt = (
+        "<context>\n"
+        f"{graph_context}\n"
+        "【私有文献详情】\n"
+        f"{vector_context}\n"
+        "</context>\n\n"
+        f"<user_query>\n{query}\n</user_query>"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def fallback_intro(query: str) -> str:
+    if is_problem_query(query):
+        return "传统企业知识管理系统的主要问题包括："
+    return "根据已检索到的证据，主要信息包括："
+
+
+def synthesize_evidence_points(query: str, evidence: list[dict]) -> list[tuple[str, str]]:
+    normalized_query = query or ""
+    if is_problem_query(normalized_query):
+        return synthesize_problem_points(evidence)
+    return synthesize_general_points(evidence)
+
+
+def is_problem_query(query: str) -> bool:
+    return any(marker in (query or "") for marker in ("问题", "不足", "痛点", "缺陷", "挑战", "瓶颈"))
+
+
+def synthesize_problem_points(evidence: list[dict]) -> list[tuple[str, str]]:
+    points: list[tuple[str, str]] = []
+    patterns = (
+        ("构建成本高", "构建成本高，企业落地和维护知识管理系统的投入压力较大"),
+        ("知识利用率低", "知识利用率低，已有知识没有被充分检索、复用和转化为业务价值"),
+        ("检索效率", "检索效率仍有改进空间，影响用户快速定位知识的体验"),
+        ("检索准确", "检索准确性仍有改进空间，容易影响知识问答结果的可靠性"),
+        ("意图理解", "意图理解仍有改进空间，系统需要更准确地识别用户真实查询目标"),
+        ("数据安全", "数据安全需要持续保障，企业知识库涉及内部资料和权限边界"),
+        ("知识覆盖范围", "知识覆盖范围仍有限，需要继续扩展更多知识来源"),
+        ("用户体验", "用户体验仍有优化空间，需要降低使用门槛并提升交互效率"),
+    )
+    seen = set()
+    for item in evidence:
+        evidence_id = item.get("id") or "E?"
+        text = evidence_text(item)
+        for marker, point in patterns:
+            if marker in text and point not in seen:
+                points.append((point, evidence_id))
+                seen.add(point)
+    return points
+
+
+def synthesize_general_points(evidence: list[dict]) -> list[tuple[str, str]]:
+    points: list[tuple[str, str]] = []
+    seen = set()
+    for item in evidence[:3]:
+        evidence_id = item.get("id") or "E?"
+        sentence = clean_evidence_sentence(item.get("snippet") or item.get("section") or "")
+        if sentence and sentence not in seen:
+            points.append((compact_context_text(sentence, 120), evidence_id))
+            seen.add(sentence)
+    return points
+
+
+def evidence_text(item: dict) -> str:
+    return " ".join(str(item.get(key) or "") for key in ("section", "snippet", "source_filename"))
+
+
+def clean_evidence_sentence(text: str) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r"^#*\s*[^，。；:：]{0,80}(?:Large Model Knowledge Management System|/ ZHOU Yang)[^。；]*[。；:：]?", "", normalized)
+    normalized = re.sub(r"^[^。；]*摘要[:：]\s*", "", normalized)
+    sentences = re.split(r"(?<=[。！？；.!?;])\s*", normalized)
+    for sentence in sentences:
+        cleaned = sentence.strip(" -，,。；;")
+        if not cleaned:
+            continue
+        if "Large Model Knowledge Management System" in cleaned or "/ ZHOU Yang" in cleaned:
+            continue
+        return cleaned
+    return normalized[:120].strip()
 
 
 def compact_context_text(text: str, max_chars: int = MAX_CONTEXT_CHARS_PER_EVIDENCE) -> str:
@@ -281,7 +441,6 @@ def build_evidence_mindmap(query: str, evidence: list[dict]) -> str:
     title = mindmap_title(query, evidence)
     if is_transformer_mindmap(query, evidence):
         return build_transformer_mindmap(title, evidence)
-
     return build_answer_structure_mindmap(query, title, evidence)
 
 
@@ -292,12 +451,11 @@ def build_transformer_mindmap(title: str, evidence: list[dict]) -> str:
     lines = [
         f"# {title}",
         "## 核心思想",
-        f"- 以 Attention/Self-Attention 建模 token 之间的依赖关系 [{primary}]",
+        f"- Transformer 以 Attention / Self-Attention 组织序列表示 [{primary}]",
         "## 结构组成",
-        f"- 多头自注意力负责从不同表示子空间捕捉关系 [{primary}]",
-        f"- 前馈层、残差连接、归一化与位置编码共同构成 Transformer block [{secondary}]",
+        f"- 多头注意力、前馈层、残差连接和归一化共同组成 Transformer block [{secondary}]",
         "## 主要优势",
-        f"- 架构由可堆叠模块组成，适合拆成可解释的计算步骤 [{tertiary}]",
+        f"- 并行性强，便于扩展到更大规模预训练任务 [{tertiary}]",
         "## 论文依据",
     ]
     lines.extend(format_evidence_outline(evidence))
@@ -325,13 +483,11 @@ def mindmap_title(query: str, evidence: list[dict]) -> str:
     query_title = mindmap_query_title(query)
     if query_title:
         return query_title
-
     for item in evidence:
         filename = item.get("source_filename")
         if filename:
             return os.path.splitext(str(filename))[0]
-    normalized = " ".join((query or "论文导图").split())
-    return compact_mindmap_text(normalized, 48)
+    return compact_mindmap_text(" ".join((query or "研究导图").split()), 48)
 
 
 def mindmap_query_title(query: str) -> str | None:
@@ -384,24 +540,9 @@ def normalize_technical_terms(text: str) -> str:
     )
 
 
-def build_fast_evidence_answer(query: str, evidence: list[dict]) -> str | None:
-    normalized_query = (query or "").lower()
-    is_definition_query = any(marker in query for marker in ("是什么", "机制", "原理", "定义"))
-    is_short_transformer_query = "transformer" in normalized_query and len((query or "").strip()) <= 80
-    if "transformer" not in normalized_query or not (is_definition_query or is_short_transformer_query) or not evidence:
-        return None
+def _mindmap_block(content: str) -> str:
+    return f"\n\n```souldrive-mindmap\n{content}\n```"
 
-    primary = evidence[0].get("id", "E1")
-    secondary = evidence[1].get("id", primary) if len(evidence) > 1 else primary
-    tertiary = evidence[2].get("id", secondary) if len(evidence) > 2 else secondary
 
-    return (
-        "根据本地论文证据，Transformer 机制可以概括为：\n\n"
-        f"- 核心思想：Transformer 是以 Attention/Self-Attention 为核心的序列建模架构，"
-        f"用注意力机制建模 token 之间的依赖关系，减少对循环层的依赖 [{primary}]。\n"
-        f"- 结构方式：典型 Transformer block 由多头自注意力、隐藏表示维度、前馈层、残差连接和归一化等模块组成，"
-        f"并配合位置编码保留序列顺序信息 [{primary}]。\n"
-        f"- 主要优势：相比传统 RNN/CNN 路线，Transformer 更容易并行训练，并能在翻译、预训练语言模型等任务中复用，"
-        f"后续 BERT/RoBERTa 等模型也建立在该架构之上 [{secondary}]。\n"
-        f"- 论文依据：当前检索到的证据包含 Transformer 架构描述、Attention Is All You Need 的引用以及后续预训练模型中的应用说明 [{tertiary}]。"
-    )
+def _evidence_block(evidence: list[dict]) -> str:
+    return f"\n\n```souldrive-evidence\n{json.dumps(evidence, ensure_ascii=False, indent=2)}\n```"

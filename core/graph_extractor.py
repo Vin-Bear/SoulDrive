@@ -5,6 +5,9 @@ from core.graph_db import LocalGraphDB
 from core.logging_config import get_logger
 from core.model_runtime import llama_runtime_config, load_llama_with_gpu_fallback, resolve_chat_model_path
 from core.observability import runtime_metrics
+from core.security_context import get_workspace_keys
+from core.secure_graph_store import SecureGraphStore
+from core.workspace import SoulDriveWorkspace
 
 logger = get_logger(__name__)
 
@@ -43,7 +46,18 @@ class GraphExtractor:
             runtime_metrics.increment("model_load_failures")
             runtime_metrics.record_error(str(exc))
             raise
-        self.db = LocalGraphDB(db_path=graph_db_path) if graph_db_path else LocalGraphDB()
+        self.db = self._build_graph_store(graph_db_path, workspace_path)
+
+    def _build_graph_store(self, graph_db_path: str | None, workspace_path: str | None):
+        if workspace_path:
+            keys = get_workspace_keys(workspace_path)
+            if keys is not None:
+                workspace = SoulDriveWorkspace(workspace_path)
+                return SecureGraphStore(workspace.secure_graph_store_path, keys)
+
+        if not graph_db_path:
+            raise ValueError("graph_db_path is required for GraphExtractor")
+        return LocalGraphDB(db_path=graph_db_path)
 
     def extract_chunks(self, chunks: list, source_filename: str = ""):
         """
@@ -289,7 +303,13 @@ class GraphExtractor:
 
 # ==================== 自动化点火测试 ====================
 if __name__ == "__main__":
-    extractor = GraphExtractor()
+    import sys
+
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: python -m core.graph_extractor <SoulDrive-workspace-path>")
+
+    workspace = SoulDriveWorkspace(sys.argv[1]).ensure()
+    extractor = GraphExtractor(graph_db_path=workspace.graph_db_path, workspace_path=workspace.root_path)
 
     # 模拟一段极其经典的 RAG 喂入文本
     sample_text = (

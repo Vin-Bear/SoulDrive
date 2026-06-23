@@ -4,16 +4,6 @@ from core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------
-# 1. 环境与路径配置
-# ---------------------------------------------------------
-# 动态获取项目根目录：__file__ 是当前文件路径，嵌套两次 dirname 相当于返回上一级的上一级目录
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# 定义图谱数据库的文件存放路径
-# 将其与 ChromaDB（向量数据库）放在同级目录 "souldrive_db" 下，方便统一管理和备份
-GRAPH_DB_PATH = os.path.join(PROJECT_ROOT, "souldrive_db", "knowledge_graph.sqlite")
-
 class LocalGraphDB:
     """
     轻量级本地图数据库管理器
@@ -21,7 +11,9 @@ class LocalGraphDB:
     适用于本地轻量级 RAG（检索增强生成）系统，避免引入庞大的外部图数据库组件。
     """
 
-    def __init__(self, db_path: str = GRAPH_DB_PATH):
+    def __init__(self, db_path: str | None = None):
+        if db_path is None:
+            raise ValueError("db_path is required for LocalGraphDB")
         self.db_path = db_path
         logger.info("[GraphDB] 正在挂载本地轻量级图数据库: %s", os.path.basename(self.db_path))
 
@@ -251,8 +243,13 @@ class LocalGraphDB:
 # 简易测试代码 (仅在直接运行此脚本时执行)
 # ---------------------------------------------------------
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: python -m core.graph_db <workspace-graph-sqlite-path>")
+
     # 1. 实例化图数据库对象（自动完成目录创建与建表）
-    db = LocalGraphDB()
+    db = LocalGraphDB(db_path=sys.argv[1])
 
     # 2. 模拟 LLM (大模型) 解析文本后提取出的知识节点
     db.add_entity("Transformer", "Architecture", "基于自注意力机制的模型")

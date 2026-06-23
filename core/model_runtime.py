@@ -8,12 +8,13 @@ from typing import Any
 
 from core.gpu_runtime import GpuAccelerationStrategy, llama_gpu_strategy, record_gpu_runtime_failure
 from core.paths import model_search_dirs, resolve_model_path
+from core.reranker import reranker_runtime_diagnostics
 
 
 DEFAULT_CHAT_MODEL = "qwen2.5-3b-instruct-q4_k_m.gguf"
 PREFERRED_CHAT_MODELS = (
-    "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
     DEFAULT_CHAT_MODEL,
+    "qwen2.5-7b-instruct-q4_k_m.gguf",
 )
 DEFAULT_EMBEDDING_MODEL = "bge-small-zh-v1.5"
 
@@ -216,11 +217,20 @@ def model_runtime_diagnostics(workspace_path: str | None = None) -> dict[str, An
     chat_path = Path(resolve_chat_model_path(workspace_path, config))
     embedding_path = Path(resolve_model_path(DEFAULT_EMBEDDING_MODEL, workspace_path))
     search_roots = model_search_dirs(workspace_path)
+    reranker_report = reranker_runtime_diagnostics(workspace_path)
     return {
         "ready": chat_path.exists() and embedding_path.exists(),
         "config": config.public_dict(),
-        "chat_model": _path_status(chat_path),
+        "chat_model": {
+            **_path_status(chat_path),
+            "selected": config.model_filename,
+        },
         "embedding_model": _path_status(embedding_path),
+        "reranker": {
+            "ready": reranker_report["ready"],
+            "selected": reranker_report["model_name"],
+            "mode": reranker_report["mode"],
+        },
         "search_roots": [_redact_path(path) for path in search_roots],
     }
 

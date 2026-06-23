@@ -9,6 +9,26 @@ from core.workspace import SoulDriveWorkspace
 
 
 class KnowledgeBasePathTests(unittest.TestCase):
+    def test_knowledge_base_requires_explicit_workspace_or_index_path(self):
+        with self.assertRaisesRegex(ValueError, "workspace_path"):
+            LocalKnowledgeBase()
+
+    def test_workspace_path_uses_workspace_index_paths_without_local_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            embedding_model_path = Path(workspace.models_path) / "bge-small-zh-v1.5"
+            embedding_model_path.mkdir(parents=True)
+            chroma_client = MagicMock()
+
+            with (
+                patch("core.knowledge_base._persistent_client", return_value=chroma_client) as persistent_client,
+                patch("core.knowledge_base._sentence_transformer"),
+            ):
+                kb = LocalKnowledgeBase(workspace_path=workspace.root_path)
+                kb.close()
+
+        persistent_client.assert_called_once_with(path=workspace.chroma_path)
+
     def test_embedding_model_can_be_loaded_from_workspace_models(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()

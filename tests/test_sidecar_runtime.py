@@ -52,11 +52,14 @@ class SidecarRuntimeTests(unittest.TestCase):
     def test_parent_process_is_alive_returns_false_for_missing_pid(self):
         self.assertFalse(sidecar_runtime.parent_process_is_alive(99999999))
 
-    def test_removable_watch_requires_explicit_env_flag(self):
+    def test_removable_watch_is_enabled_by_default(self):
         with patch.dict("os.environ", {"SOULDRIVE_WATCH_REMOVABLE": "1"}, clear=False):
             self.assertTrue(sidecar_runtime.removable_watch_enabled())
 
         with patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(sidecar_runtime.removable_watch_enabled())
+
+        with patch.dict("os.environ", {"SOULDRIVE_WATCH_REMOVABLE": "0"}, clear=True):
             self.assertFalse(sidecar_runtime.removable_watch_enabled())
 
     def test_frozen_indexer_command_forces_process_exit_after_worker_returns(self):

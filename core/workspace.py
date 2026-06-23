@@ -4,7 +4,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.paths import local_data_root
 WORKSPACE_DIR = "SoulDrive"
 WORKSPACE_MANIFEST = "workspace.json"
 WORKSPACE_VERSION = 1
@@ -17,7 +16,9 @@ class SoulDriveWorkspace:
     @classmethod
     def default(cls):
         configured = os.environ.get("SOULDRIVE_WORKSPACE")
-        return cls(configured) if configured else cls(str(local_data_root()))
+        if not configured:
+            raise RuntimeError("SOULDRIVE_WORKSPACE must be set for an explicit local workspace")
+        return cls(configured)
 
     @classmethod
     def from_drive(cls, drive_path: str):
@@ -26,6 +27,14 @@ class SoulDriveWorkspace:
     @property
     def papers_path(self):
         return str(Path(self.root_path) / "data" / "papers")
+
+    @property
+    def documents_path(self):
+        return str(Path(self.root_path) / "data" / "documents")
+
+    @property
+    def document_manifest_path(self):
+        return str(Path(self.documents_path) / "manifest.sqlite")
 
     @property
     def index_path(self):
@@ -40,12 +49,20 @@ class SoulDriveWorkspace:
         return str(Path(self.index_path) / "knowledge_graph.sqlite")
 
     @property
+    def secure_graph_store_path(self):
+        return str(Path(self.index_path) / "secure_graph.sqlite")
+
+    @property
     def parent_doc_path(self):
         return str(Path(self.index_path) / "parent_docs.sqlite")
 
     @property
     def keyword_index_path(self):
         return str(Path(self.index_path) / "keyword_index.sqlite")
+
+    @property
+    def secure_vector_store_path(self):
+        return str(Path(self.index_path) / "secure_vectors.sqlite")
 
     @property
     def audit_log_path(self):
@@ -78,6 +95,7 @@ class SoulDriveWorkspace:
     def ensure(self):
         for path in (
             self.papers_path,
+            self.documents_path,
             self.index_path,
             self.chroma_path,
             str(Path(self.root_path) / "audit"),
@@ -98,6 +116,7 @@ class SoulDriveWorkspace:
             "workspace_version": WORKSPACE_VERSION,
             "layout": {
                 "papers": "data/papers",
+                "documents": "data/documents",
                 "index": "index",
                 "audit": "audit",
                 "models": "models",
@@ -111,6 +130,7 @@ class SoulDriveWorkspace:
         checks = {
             "root": root.exists(),
             "papers": Path(self.papers_path).exists(),
+            "documents": Path(self.documents_path).exists(),
             "index": Path(self.index_path).exists(),
             "audit": Path(self.audit_log_path).parent.exists(),
             "models": Path(self.models_path).exists(),
@@ -155,4 +175,4 @@ def is_souldrive_workspace(drive_path: str):
 def resolve_workspace(active_drive: str | None = None):
     if active_drive:
         return SoulDriveWorkspace.from_drive(active_drive).ensure()
-    return SoulDriveWorkspace.default().ensure()
+    raise RuntimeError("removable SoulDrive workspace is not mounted")

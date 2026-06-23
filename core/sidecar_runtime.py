@@ -8,11 +8,10 @@ from pathlib import Path
 
 import uvicorn
 
-from core.audit_log import AuditLogger, default_audit_logger
+from core.audit_log import default_audit_logger
 from core.paths import app_root
 from core.runtime_config import api_host, api_port
-from core.runtime_state import lock_runtime, unlock_runtime
-from core.workspace import SoulDriveWorkspace
+from core.runtime_state import lock_runtime
 
 _RUNTIME_LOG_STREAM = None
 
@@ -89,7 +88,7 @@ def parent_pid_from_env():
 
 
 def removable_watch_enabled():
-    return os.environ.get("SOULDRIVE_WATCH_REMOVABLE") == "1"
+    return os.environ.get("SOULDRIVE_WATCH_REMOVABLE", "1") != "0"
 
 
 def parent_process_is_alive(parent_pid: int):
@@ -176,20 +175,12 @@ def main(argv: list[str] | None = None):
                 "workspace": "removable-watch",
             })
         else:
-            workspace = SoulDriveWorkspace.default().ensure()
-            audit_logger = AuditLogger.for_workspace(workspace)
-            unlock_runtime(
-                auth_level="PRO",
-                hardware_sn=None,
-                active_drive=None,
-                workspace_path=workspace.root_path,
-                reason="local workspace mounted",
-            )
-            startup_log(f"workspace mounted path={workspace.root_path}")
+            lock_runtime("waiting for removable SoulDrive workspace")
+            startup_log("removable workspace watcher disabled; API remains locked without a mounted workspace")
             audit_logger.append_event("sidecar.started", {
                 "host": host,
                 "port": port,
-                "workspace": "local",
+                "workspace": "locked-no-removable-watch",
             })
 
         from core import mcp_server

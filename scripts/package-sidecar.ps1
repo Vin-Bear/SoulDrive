@@ -8,6 +8,7 @@ $Python = if ($env:SOULDRIVE_PYTHON) { $env:SOULDRIVE_PYTHON } else { "D:\Anacon
 $Entry = Join-Path $Root "scripts\sidecar_entry.py"
 $SidecarDir = Join-Path $Root "souldrive-ui\src-tauri\sidecars"
 $BuildDir = Join-Path $Root "build\pyinstaller"
+$DoclingParseResources = "D:\Anaconda\envs\souldrive\Lib\site-packages\docling_parse\pdf_resources"
 
 function Remove-FileInsideDirectory {
     param(
@@ -71,6 +72,9 @@ try {
         --workpath $BuildDir `
         --specpath $BuildDir `
         --collect-all docling `
+        --copy-metadata docling `
+        --copy-metadata docling_slim `
+        --add-data "${DoclingParseResources};docling_parse/pdf_resources" `
         --collect-all rapidocr `
         --collect-all onnxruntime `
         --collect-all chromadb `
@@ -78,7 +82,6 @@ try {
         --collect-all transformers `
         --collect-all tokenizers `
         --collect-all llama_cpp `
-        --exclude-module torchvision `
         --exclude-module tensorboard `
         --exclude-module matplotlib `
         --exclude-module IPython `

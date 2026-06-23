@@ -83,12 +83,13 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual(report["invalid_lines"], [2])
         self.assertNotIn("audit_path", report)
 
-    def test_default_audit_logger_follows_app_root_env(self):
+    def test_default_audit_logger_follows_app_runtime_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.dict(os.environ, {"SOULDRIVE_APP_ROOT": temp_dir}, clear=False):
                 event = append_audit_event("runtime.unlock", {"auth_level": "PRO"})
-                audit_path = Path(temp_dir) / "souldrive_db" / "audit_log.jsonl"
+                audit_path = Path(temp_dir) / "runtime" / "audit_log.jsonl"
                 self.assertTrue(audit_path.exists())
+                self.assertFalse((Path(temp_dir) / "souldrive_db").exists())
 
         self.assertEqual(event["event_type"], "runtime.unlock")
 

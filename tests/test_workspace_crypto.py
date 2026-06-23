@@ -9,6 +9,8 @@ from core.workspace_crypto import (
     IncorrectPassphraseError,
     initialize_keystore,
     is_keystore_initialized,
+    migrate_keystore_if_needed,
+    rotate_passphrase,
     unlock_keystore,
 )
 
@@ -22,8 +24,8 @@ class WorkspaceCryptoTests(unittest.TestCase):
             initialized = is_keystore_initialized(workspace)
 
         self.assertTrue(result["initialized"])
-        self.assertEqual(payload["version"], 1)
-        self.assertEqual(payload["kdf"], "pbkdf2-sha256")
+        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["kdf"], "argon2id")
         self.assertEqual(payload["key_wrap"], "aes-256-gcm")
         self.assertNotIn("correct horse battery staple", json.dumps(payload))
         self.assertGreater(len(base64.b64decode(payload["encrypted_workspace_data_key"])), 32)
@@ -51,6 +53,52 @@ class WorkspaceCryptoTests(unittest.TestCase):
         self.assertEqual(first.audit_key, second.audit_key)
         self.assertEqual(len(first.workspace_data_key), 32)
         self.assertEqual(len(first.document_key), 32)
+
+    def test_unlock_keystore_keeps_v1_payload_compatible_until_migrated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            initialize_keystore(workspace, "legacy-passphrase", format_version=1)
+
+            payload_before = json.loads(Path(workspace.keystore_path).read_text(encoding="utf-8"))
+            keys = unlock_keystore(workspace, "legacy-passphrase")
+            payload_after = json.loads(Path(workspace.keystore_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(payload_before["version"], 1)
+        self.assertEqual(payload_after["version"], 1)
+        self.assertEqual(len(keys.workspace_data_key), 32)
+
+    def test_migrate_keystore_rewrites_v1_payload_to_v2_without_changing_workspace_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            initialize_keystore(workspace, "legacy-passphrase", format_version=1)
+            legacy_keys = unlock_keystore(workspace, "legacy-passphrase")
+
+            migration = migrate_keystore_if_needed(workspace, "legacy-passphrase")
+            migrated_payload = json.loads(Path(workspace.keystore_path).read_text(encoding="utf-8"))
+            migrated_keys = unlock_keystore(workspace, "legacy-passphrase")
+
+        self.assertTrue(migration["migrated"])
+        self.assertEqual(migrated_payload["version"], 2)
+        self.assertEqual(migrated_payload["kdf"], "argon2id")
+        self.assertEqual(legacy_keys.workspace_data_key, migrated_keys.workspace_data_key)
+
+    def test_rotate_passphrase_rewraps_workspace_key_without_reencrypting_data_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            initialize_keystore(workspace, "old-passphrase")
+            previous_keys = unlock_keystore(workspace, "old-passphrase")
+
+            rotation = rotate_passphrase(workspace, "old-passphrase", "new-passphrase")
+            rotated_payload = json.loads(Path(workspace.keystore_path).read_text(encoding="utf-8"))
+            rotated_keys = unlock_keystore(workspace, "new-passphrase")
+
+            with self.assertRaises(IncorrectPassphraseError):
+                unlock_keystore(workspace, "old-passphrase")
+
+        self.assertTrue(rotation["rotated"])
+        self.assertEqual(rotated_payload["version"], 2)
+        self.assertEqual(previous_keys.workspace_data_key, rotated_keys.workspace_data_key)
+        self.assertEqual(previous_keys.document_key, rotated_keys.document_key)
 
 
 if __name__ == "__main__":

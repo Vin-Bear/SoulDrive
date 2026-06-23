@@ -11,9 +11,9 @@ from core.hardware_security import HardwareAuthenticator
 from core.license import authorization_from_hardware_and_license
 from core.logging_config import get_logger
 from core.model_assets import sync_workspace_models
-from core.paper_importer import import_drive_root_papers
 from core.runtime_config import api_base_url
 from core.runtime_state import lock_runtime, unlock_runtime, use_workspace_runtime_state
+from core.security_context import WORKSPACE_DATA_KEY_ENV, export_workspace_data_key, get_workspace_keys
 from core.workspace import SoulDriveWorkspace, is_souldrive_workspace
 
 logger = get_logger(__name__)
@@ -93,10 +93,6 @@ class UDriveWatcher:
 
     def prepare_workspace(self, drive_path: str) -> SoulDriveWorkspace:
         workspace = SoulDriveWorkspace.from_drive(drive_path).ensure()
-        imported = import_drive_root_papers(drive_path, workspace)
-        imported_count = sum(1 for item in imported if item["status"] == "imported")
-        if imported_count:
-            logger.info("[Workspace] 已将 U 盘根目录中的 %s 篇 PDF 导入 SoulDrive 工作区。", imported_count)
         synced_models = sync_workspace_models(workspace)
         copied_models = [item for item in synced_models if item["status"] in {"copied", "updated"}]
         missing_models = [item["name"] for item in synced_models if item["status"] == "missing_source"]
@@ -156,9 +152,6 @@ class UDriveWatcher:
                 logger.info("[System] 正在拉起 MCP Server，当前运行模式: [%s]", self.auth_level)
                 logger.info("==================================================")
 
-                # 步骤 B：执行耗时的离线向量化入库 (RAG Indexing)
-                self._start_indexer_worker(self.current_drive, self.auth_level)
-
             # ==========================================================
             # 逻辑分支 2：下降沿触发 (Detect Removal)
             # 状态机：之前有盘在系统中，但现在检测不到了（被物理拔出）
@@ -206,6 +199,10 @@ class UDriveWatcher:
         self._stop_indexer_worker()
         command = build_indexer_worker_command(drive_path, auth_level)
         env = os.environ.copy()
+        workspace = SoulDriveWorkspace.from_drive(drive_path).ensure()
+        workspace_keys = get_workspace_keys(workspace.root_path)
+        if workspace_keys is not None:
+            env[WORKSPACE_DATA_KEY_ENV] = export_workspace_data_key(workspace_keys)
         try:
             self.indexer_process = subprocess.Popen(
                 command,

@@ -1,8 +1,10 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from core.workspace import SoulDriveWorkspace, is_souldrive_workspace
+from core.workspace import SoulDriveWorkspace, is_souldrive_workspace, resolve_workspace
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -28,6 +30,24 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(diagnostics["checks"]["manifest"])
         self.assertIn("free_bytes", diagnostics["disk"])
         self.assertIn("minimum_free_bytes", diagnostics["disk"])
+
+    def test_default_workspace_requires_explicit_environment_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "SOULDRIVE_WORKSPACE"):
+                SoulDriveWorkspace.default()
+
+    def test_resolve_workspace_requires_active_drive_or_environment_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "removable SoulDrive workspace"):
+                resolve_workspace(None)
+
+    def test_default_workspace_can_be_explicitly_configured_for_tests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configured = str(Path(temp_dir) / "configured-workspace")
+            with patch.dict(os.environ, {"SOULDRIVE_WORKSPACE": configured}, clear=True):
+                workspace = SoulDriveWorkspace.default().ensure()
+
+        self.assertEqual(workspace.root_path, configured)
 
 
 if __name__ == "__main__":

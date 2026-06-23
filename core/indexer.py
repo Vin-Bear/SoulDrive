@@ -2,12 +2,17 @@ import os
 import glob
 import gc
 import hashlib
+import shutil
 import time
 import uuid
+from pathlib import Path
 from core.indexing_errors import indexing_failure
 from core.logging_config import get_logger
 from core.runtime_state import update_indexing_status
+from core.secure_document_store import SecureDocumentStore
+from core.security_context import get_workspace_keys
 from core.workspace import SoulDriveWorkspace
+from core.paper_importer import safe_pdf_filename
 
 logger = get_logger(__name__)
 
@@ -30,6 +35,7 @@ class DriveIndexer:
         self.graph_extractor_factory = graph_extractor_factory
         self.kb = None
         self.workspace = None
+        self._index_source_names = {}
 
     def _calculate_file_hash(self, file_path: str) -> str:
         """计算文件的 MD5 哈希值，用于精确比对文件内容是否发生物理改变"""
@@ -49,6 +55,41 @@ class DriveIndexer:
     def discover_workspace_pdf_files(workspace: SoulDriveWorkspace):
         # Local workspace root is already resolved; do not append SoulDrive again.
         return glob.glob(os.path.join(workspace.papers_path, "**/*.pdf"), recursive=True)
+
+    def _discover_index_pdf_files(self):
+        workspace_keys = get_workspace_keys(self.workspace.root_path)
+        if workspace_keys is None:
+            return self.discover_workspace_pdf_files(self.workspace), None
+
+        temp_dir = Path(self.workspace.runtime_path) / f"secure-index-{uuid.uuid4().hex}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        store = SecureDocumentStore(self.workspace, workspace_keys)
+        pdf_files = []
+        try:
+            for document in store.iter_documents():
+                object_id = document["object_id"]
+                temp_name = f"{object_id}.pdf"
+                temp_path = temp_dir / temp_name
+                temp_path.write_bytes(store.read_document_bytes(object_id))
+                path_text = str(temp_path)
+                pdf_files.append(path_text)
+                self._index_source_names[path_text] = safe_pdf_filename(document["name"])
+        finally:
+            store.close()
+        return pdf_files, temp_dir
+
+    def _cleanup_secure_index_temp_dir(self, temp_dir):
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            temp_prefix = str(temp_dir)
+            self._index_source_names = {
+                path: name
+                for path, name in self._index_source_names.items()
+                if not path.startswith(temp_prefix)
+            }
+
+    def _source_display_name(self, pdf_path: str):
+        return self._index_source_names.get(pdf_path, os.path.basename(pdf_path))
 
     def sync_drive(self, drive_path: str, auth_level: str = "PRO"):
         workspace = SoulDriveWorkspace.from_drive(drive_path).ensure()
@@ -89,7 +130,7 @@ class DriveIndexer:
             keyword_index_path=self.workspace.keyword_index_path,
             workspace_path=self.workspace.root_path,
         )
-        pdf_files = self.discover_workspace_pdf_files(self.workspace)
+        pdf_files, secure_index_temp_dir = self._discover_index_pdf_files()
         update_indexing_status(
             status="scanning",
             run_id=run_id,
@@ -112,7 +153,7 @@ class DriveIndexer:
         for pdf_path in pdf_files:
             # 1. 计算当前硬盘上文件的真实 MD5
             file_hash = self._calculate_file_hash(pdf_path)
-            doc_id = os.path.basename(pdf_path)
+            doc_id = self._source_display_name(pdf_path)
 
             # 2. 使用哈希值作为查询凭证，向 ChromaDB 探查
             index_status = self._document_index_status(file_hash)
@@ -142,6 +183,7 @@ class DriveIndexer:
                 finished_at=time.time(),
                 disk=disk_report,
             )
+            self._cleanup_secure_index_temp_dir(secure_index_temp_dir)
             return
 
         logger.info("[Indexer] 发现 %s 篇新文献或变更文献，开始唤醒解析引擎...", len(files_to_process))
@@ -240,6 +282,7 @@ class DriveIndexer:
                 )
 
         self._teardown_parser()
+        self._cleanup_secure_index_temp_dir(secure_index_temp_dir)
         update_indexing_status(
             status="completed",
             total_files=len(files_to_process),

@@ -58,15 +58,16 @@ class ModelRuntimeTests(unittest.TestCase):
         self.assertEqual(config.graph_n_ctx, 8192)
         self.assertEqual(config.max_tokens, 900)
 
-    def test_preferred_chat_model_uses_7b_when_available(self):
+    def test_preferred_chat_model_keeps_standard_3b_default_when_7b_is_available(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             model_dir = Path(temp_dir)
-            (model_dir / "qwen2.5-coder-7b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+            (model_dir / "qwen2.5-7b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
 
             with patch.dict(os.environ, {"SOULDRIVE_MODEL_DIR": str(model_dir)}):
                 model_filename = preferred_chat_model_filename()
 
-        self.assertEqual(model_filename, "qwen2.5-coder-7b-instruct-q4_k_m.gguf")
+        self.assertEqual(model_filename, "qwen2.5-3b-instruct-q4_k_m.gguf")
 
     def test_preferred_chat_model_falls_back_to_3b(self):
         with tempfile.TemporaryDirectory() as temp_dir:

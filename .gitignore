@@ -23,6 +23,10 @@ souldrive-ui/src-tauri/sidecars/souldrive-sidecar.exe
 # Local runtime data
 runtime/
 souldrive_db/
+data/
+index/
+audit/
+config/workspace.json
 *.log
 *.sqlite
 *.sqlite3

@@ -8,18 +8,22 @@ from unittest.mock import patch
 import core.runtime_state as runtime_state
 from core.diagnostics import product_diagnostics
 from core.license import LicenseStatus
+from core.workspace import SoulDriveWorkspace
 
 
 class DiagnosticsTests(unittest.TestCase):
-    def test_product_diagnostics_reports_local_runtime_state(self):
+    def test_product_diagnostics_reports_mounted_workspace_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            workspace = _create_workspace_with_models(root / "drive")
             _create_minimal_project_root(root)
+            state_path = str(root / "runtime_state.json")
 
             with patch.dict(os.environ, {
                 "SOULDRIVE_APP_ROOT": str(root),
                 "SOULDRIVE_MODEL_DIR": str(root / "models"),
-            }):
+            }), patch.object(runtime_state, "STATE_PATH", state_path):
+                runtime_state.unlock_runtime("PRO", "SN-1", str(root / "drive"), workspace.root_path)
                 report = product_diagnostics()
 
         self.assertIn("checks", report)
@@ -27,6 +31,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertTrue(report["checks"]["workspace"])
         self.assertTrue(report["checks"]["audit_chain"])
         self.assertTrue(report["models"]["ready"])
+        self.assertEqual(report["models"]["runtime"]["chat_model"]["selected"], "qwen2.5-3b-instruct-q4_k_m.gguf")
+        self.assertEqual(report["models"]["runtime"]["reranker"]["selected"], "mmarco-mMiniLMv2-L6-H384-v1")
         self.assertNotIn("audit_path", report["audit"])
         self.assertNotIn("package", report)
         self.assertNotIn("release", report)
@@ -35,13 +41,15 @@ class DiagnosticsTests(unittest.TestCase):
     def test_product_diagnostics_redacts_license_source_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            workspace = _create_workspace_with_models(root / "drive")
             license_path = root / "config" / "license.json"
             _create_minimal_project_root(root)
+            state_path = str(root / "runtime_state.json")
 
             with patch.dict(os.environ, {
                 "SOULDRIVE_APP_ROOT": str(root),
                 "SOULDRIVE_MODEL_DIR": str(root / "models"),
-            }), patch(
+            }), patch.object(runtime_state, "STATE_PATH", state_path), patch(
                 "core.diagnostics.verify_license_for_workspace",
                 return_value=LicenseStatus(
                     True,
@@ -51,6 +59,7 @@ class DiagnosticsTests(unittest.TestCase):
                     license_id="lic-1",
                 ),
             ):
+                runtime_state.unlock_runtime("PRO", "SN-1", str(root / "drive"), workspace.root_path)
                 report = product_diagnostics()
 
         self.assertEqual(report["license"]["source"], "license.json")
@@ -69,11 +78,16 @@ class DiagnosticsTests(unittest.TestCase):
                 report = product_diagnostics()
 
         self.assertFalse(report["checks"]["runtime_unlocked"])
+        self.assertFalse(report["checks"]["workspace"])
+        self.assertFalse(report["checks"]["audit_chain"])
+        self.assertFalse(report["workspace"]["ready"])
+        self.assertEqual(report["workspace"]["reason"], "waiting for removable SoulDrive workspace")
         self.assertFalse(report["ready"])
 
 
 def _create_minimal_project_root(root: Path):
     (root / "models" / "bge-small-zh-v1.5" / "1_Pooling").mkdir(parents=True)
+    (root / "models" / "mmarco-mMiniLMv2-L6-H384-v1").mkdir(parents=True)
     (root / "models" / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
     for relative_path in (
         "bge-small-zh-v1.5/config.json",
@@ -88,6 +102,23 @@ def _create_minimal_project_root(root: Path):
         "require_signed_license": False,
         "model_manifest_required": True,
     }), encoding="utf-8")
+
+
+def _create_workspace_with_models(drive_root: Path):
+    workspace = SoulDriveWorkspace.from_drive(str(drive_root)).ensure()
+    for relative_path in (
+        "bge-small-zh-v1.5/config.json",
+        "bge-small-zh-v1.5/model.safetensors",
+        "bge-small-zh-v1.5/tokenizer.json",
+        "bge-small-zh-v1.5/vocab.txt",
+        "bge-small-zh-v1.5/1_Pooling/config.json",
+    ):
+        target = Path(workspace.models_path) / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}", encoding="utf-8")
+    (Path(workspace.models_path) / "mmarco-mMiniLMv2-L6-H384-v1").mkdir(parents=True)
+    (Path(workspace.models_path) / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("model", encoding="utf-8")
+    return workspace
 
 
 if __name__ == "__main__":

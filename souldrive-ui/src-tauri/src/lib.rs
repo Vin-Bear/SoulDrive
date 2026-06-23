@@ -109,7 +109,11 @@ fn spawn_backend<R: Runtime>(
     api_port: u16,
 ) -> std::io::Result<Child> {
     let runtime_root = runtime_root(app);
-    let configured_sidecar = sidecar_executable(app, &runtime_root);
+    let configured_sidecar = if prefer_source_backend() {
+        None
+    } else {
+        sidecar_executable(app, &runtime_root)
+    };
 
     if let Some(sidecar_path) = configured_sidecar {
         let mut command = Command::new(sidecar_path);
@@ -131,13 +135,8 @@ fn spawn_backend<R: Runtime>(
         return command.spawn();
     }
 
-    let python = std::env::var("SOULDRIVE_PYTHON")
-        .unwrap_or_else(|_| String::from("python"));
-
-    let mut command = Command::new(python);
+    let mut command = source_backend_command();
     command
-        .arg("-m")
-        .arg("core.sidecar_runtime")
         .env("SOULDRIVE_API_TOKEN", api_token)
         .env("SOULDRIVE_API_PORT", api_port.to_string())
         .env("SOULDRIVE_APP_ROOT", &runtime_root)
@@ -153,6 +152,38 @@ fn spawn_backend<R: Runtime>(
     command.creation_flags(CREATE_NO_WINDOW);
 
     command.spawn()
+}
+
+fn prefer_source_backend() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("SOULDRIVE_DEV_USE_PACKAGED_SIDECAR")
+            .map(|value| value != "1")
+            .unwrap_or(true)
+        && std::env::var("SOULDRIVE_SIDECAR_EXE").is_err()
+}
+
+fn source_backend_command() -> Command {
+    if let Ok(python) = std::env::var("SOULDRIVE_PYTHON") {
+        let mut command = Command::new(python);
+        command.arg("-m").arg("core.sidecar_runtime");
+        return command;
+    }
+
+    if cfg!(debug_assertions) {
+        let mut command = Command::new("conda");
+        command
+            .arg("run")
+            .arg("-n")
+            .arg("souldrive")
+            .arg("python")
+            .arg("-m")
+            .arg("core.sidecar_runtime");
+        return command;
+    }
+
+    let mut command = Command::new("python");
+    command.arg("-m").arg("core.sidecar_runtime");
+    command
 }
 
 fn runtime_root<R: Runtime>(app: &impl Manager<R>) -> PathBuf {
@@ -189,6 +220,9 @@ fn sidecar_candidates<R: Runtime>(app: &impl Manager<R>, runtime_root: &PathBuf)
     let executable_name = sidecar_executable_name();
     let mut roots = Vec::new();
     roots.push(runtime_root.clone());
+    if cfg!(debug_assertions) {
+        roots.push(development_sidecar_root());
+    }
     if let Ok(resource_dir) = app.path().resource_dir() {
         roots.push(resource_dir);
     }
@@ -208,6 +242,12 @@ fn sidecar_candidates<R: Runtime>(app: &impl Manager<R>, runtime_root: &PathBuf)
         );
     }
     candidates
+}
+
+fn development_sidecar_root() -> PathBuf {
+    development_project_root()
+        .join("souldrive-ui")
+        .join("src-tauri")
 }
 
 #[cfg(windows)]

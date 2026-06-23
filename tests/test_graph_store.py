@@ -6,6 +6,10 @@ from core.graph_db import LocalGraphDB
 
 
 class GraphStoreTests(unittest.TestCase):
+    def test_sqlite_graph_store_requires_explicit_path(self):
+        with self.assertRaisesRegex(ValueError, "db_path"):
+            LocalGraphDB()
+
     def test_sqlite_graph_store_returns_context_for_matched_entity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = LocalGraphDB(db_path=str(Path(temp_dir) / "graph.sqlite"))

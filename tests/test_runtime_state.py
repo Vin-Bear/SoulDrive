@@ -21,6 +21,19 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(second["auth_level"], "NONE")
         self.assertEqual(second["indexing"]["failures"], [])
 
+    def test_default_runtime_state_path_uses_app_runtime_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"SOULDRIVE_APP_ROOT": temp_dir}, clear=False), patch.object(
+                runtime_state,
+                "STATE_PATH",
+                None,
+            ):
+                runtime_state.lock_runtime("test lock")
+                state_path = Path(runtime_state.runtime_state_path())
+
+        self.assertEqual(state_path, Path(temp_dir) / "runtime" / "runtime_state.json")
+        self.assertFalse((Path(temp_dir) / "souldrive_db").exists())
+
     def test_runtime_state_merges_indexing_without_shared_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = str(Path(temp_dir) / "runtime_state.json")
@@ -46,6 +59,26 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue(state["hardware_mounted"])
         self.assertFalse(state["software_unlocked"])
         self.assertEqual(state["security_reason"], "workspace passphrase required")
+
+    def test_runtime_unlock_resets_stale_indexing_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = str(Path(temp_dir) / "runtime_state.json")
+            workspace = SoulDriveWorkspace.from_drive(temp_dir).ensure()
+            with patch.object(runtime_state, "STATE_PATH", state_path):
+                runtime_state.set_runtime_state(
+                    indexing={
+                        "status": "indexing",
+                        "total_files": 2,
+                        "processed_files": 1,
+                        "succeeded_files": 1,
+                    }
+                )
+                state = runtime_state.unlock_runtime("PRO", "SN-1", temp_dir, workspace.root_path)
+
+        self.assertEqual(state["indexing"]["status"], "idle")
+        self.assertEqual(state["indexing"]["total_files"], 0)
+        self.assertEqual(state["indexing"]["processed_files"], 0)
+        self.assertEqual(state["indexing"]["succeeded_files"], 0)
 
     def test_mark_software_unlocked_allows_sensitive_workflows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,6 +116,16 @@ class RuntimeStateTests(unittest.TestCase):
                 result = _run_async(runtime_unlock(RuntimeRequest(active_drive=candidate_drive)))
 
         self.assertEqual(result.status_code, 400)
+
+    def test_runtime_unlock_rejects_missing_removable_workspace(self):
+        from core.mcp_server import RuntimeRequest, runtime_unlock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = str(Path(temp_dir) / "runtime_state.json")
+            with patch.object(runtime_state, "STATE_PATH", state_path):
+                result = _run_async(runtime_unlock(RuntimeRequest(auth_level="PRO")))
+
+        self.assertEqual(result.status_code, 423)
 
     def test_public_runtime_state_redacts_local_paths(self):
         from core.mcp_server import public_runtime_state

@@ -110,6 +110,7 @@ def unlock_runtime(
         crypto_initialized=False,
         software_unlocked=False,
         security_reason="workspace passphrase required",
+        indexing=copy.deepcopy(DEFAULT_STATE["indexing"]),
     )
     audit_logger.append_event("runtime.unlock", {
         "auth_level": "HARDWARE_ONLY",
